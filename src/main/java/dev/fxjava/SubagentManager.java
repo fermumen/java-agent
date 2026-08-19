@@ -27,6 +27,7 @@ final class SubagentManager implements AutoCloseable {
     private static final int MAX_CHILDREN = 32;
     private static final int MAX_MESSAGES = 256;
     private static final int MAX_EVENTS = 256;
+    private static final int MAX_OPERATIONS = 256;
     private static final Set<String> SETTLED = Set.of("idle", "interrupted", "completed", "failed", "cancelled", "archived");
     private final ObjectMapper json;
     private final ChildFactory childFactory;
@@ -34,6 +35,7 @@ final class SubagentManager implements AutoCloseable {
     private final ExecutorService executor;
     private final SubagentStateStore stateStore;
     private final Map<String, Child> children = new LinkedHashMap<>();
+    private final LinkedHashMap<String, OperationReplay> operations = new LinkedHashMap<>();
 
     SubagentManager(ObjectMapper json, ChildFactory childFactory, PermissionMode parentPermission) {
         this(json, childFactory, parentPermission, null);
@@ -53,6 +55,10 @@ final class SubagentManager implements AutoCloseable {
     }
 
     synchronized void restore() throws Exception {
+        for (SubagentStateStore.Operation saved : stateStore.loadOperations()) {
+            operations.put(saved.operationId(), new OperationReplay(
+                    saved.requestFingerprint(), saved.receipt()));
+        }
         for (ObjectNode saved : stateStore.load()) {
             if (children.size() >= MAX_CHILDREN) break;
             String id = saved.path("id").asText();
@@ -138,10 +144,17 @@ final class SubagentManager implements AutoCloseable {
         return Set.of("queued", "running", "awaiting_approval").contains(state) ? "interrupted" : state;
     }
 
-    String execute(SubagentCommand command, String invocationId) throws Exception {
+    synchronized String execute(SubagentCommand command, String invocationId) throws Exception {
         String operationId = operationId(invocationId);
+        String fingerprint = requestFingerprint(command);
+        OperationReplay replay = operations.get(operationId);
+        if (replay != null) {
+            if (replay.fingerprint().equals(fingerprint)) return replay.receipt();
+            return failure(operationId, null, "operation_conflict", false);
+        }
+        String result;
         try {
-            return switch (command.branch()) {
+            result = switch (command.branch()) {
                 case "create" -> create(operationId, command.value());
                 case "inspect" -> inspect(operationId, command.value());
                 case "message" -> message(operationId, command.value());
@@ -151,7 +164,52 @@ final class SubagentManager implements AutoCloseable {
                 default -> failure(operationId, null, "invalid_branch_selection", false);
             };
         } catch (SubagentFailure failure) {
-            return failure(operationId, failure.childId, failure.code, failure.retryable);
+            result = failure(operationId, failure.childId, failure.code, failure.retryable);
+        }
+        remember(operationId, fingerprint, result);
+        return result;
+    }
+
+    private void remember(String operationId, String fingerprint, String receipt) throws IOException {
+        operations.put(operationId, new OperationReplay(fingerprint, receipt));
+        while (operations.size() > MAX_OPERATIONS) {
+            operations.remove(operations.keySet().iterator().next());
+        }
+        List<SubagentStateStore.Operation> saved = new ArrayList<>();
+        for (var entry : operations.entrySet()) {
+            saved.add(new SubagentStateStore.Operation(entry.getKey(), entry.getValue().fingerprint(),
+                    entry.getValue().receipt()));
+        }
+        stateStore.saveOperations(saved);
+    }
+
+    private String requestFingerprint(SubagentCommand command) throws IOException {
+        try {
+            MessageDigest hash = MessageDigest.getInstance("SHA-256");
+            hash.update(command.branch().getBytes(StandardCharsets.UTF_8));
+            hashNode(hash, command.value());
+            return java.util.HexFormat.of().formatHex(hash.digest());
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException(impossible);
+        }
+    }
+
+    private void hashNode(MessageDigest hash, JsonNode node) throws IOException {
+        if (node.isObject()) {
+            hash.update((byte) 1);
+            java.util.TreeMap<String, JsonNode> fields = new java.util.TreeMap<>();
+            node.properties().forEach(entry -> fields.put(entry.getKey(), entry.getValue()));
+            for (var entry : fields.entrySet()) {
+                hash.update(entry.getKey().getBytes(StandardCharsets.UTF_8));
+                hash.update((byte) 0);
+                hashNode(hash, entry.getValue());
+            }
+        } else if (node.isArray()) {
+            hash.update((byte) 2);
+            for (JsonNode child : node) hashNode(hash, child);
+        } else {
+            hash.update((byte) 3);
+            hash.update(json.writeValueAsBytes(node));
         }
     }
 
@@ -517,6 +575,7 @@ final class SubagentManager implements AutoCloseable {
     record ChildConfiguration(String id, String name, String model, String effort, PermissionMode permissionMode) { }
     private record Message(String role, String content, long createdAtMs) { }
     private record MessagePage(ArrayNode values, String nextCursor) { }
+    private record OperationReplay(String fingerprint, String receipt) { }
 
     private final class Child {
         final String id;

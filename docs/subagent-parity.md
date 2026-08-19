@@ -22,11 +22,15 @@ requested projections, and pagination cursor.
 - restart reconciliation of active work to `interrupted`, with execution held
   until explicit resume;
 - executable integration coverage proving that a parent Responses agent can
-  create a child Responses agent and inspect its completed response.
+  create a child Responses agent and inspect its completed response;
+- bounded canonical operation fingerprints with exact receipt replay,
+  changed-request conflict rejection, atomic persistence, restart recovery,
+  eviction, and corrupt-ledger isolation.
 
 The primary Java owners are `SubagentCommandParityTest`,
 `SubagentManagerParityTest`, `SubagentPaginationParityTest`,
-`SubagentPersistenceParityTest`, `SubagentToolActivityParityTest`, and
+`SubagentPersistenceParityTest`, `SubagentOperationReplayTest`,
+`SubagentToolActivityParityTest`, and
 `MainSubagentIntegrationTest`.
 
 ## Remaining subagent work
@@ -34,5 +38,4 @@ The primary Java owners are `SubagentCommandParityTest`,
 Notification policy is validated and persisted but is not yet projected into a
 parent-session asynchronous notification stream. Milestone authorship is not
 yet restricted to a child-scoped identity, relationship state does not have
-fx's separate durable index, and operation IDs do not yet provide a replay
-ledger for idempotent retries. These limits are not counted as parity yet.
+fx's separate durable index. These limits are not counted as parity yet.

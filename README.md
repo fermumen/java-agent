@@ -106,11 +106,10 @@ keep confirmation enabled and use your corporate sandbox where appropriate.
 
 ## Parity roadmap
 
-Gateway support remains intentionally excluded. Responses compaction,
+Gateway support and further ACP parity are intentionally excluded. The existing compact ACP mode remains available for compatibility. Responses compaction,
 crash-recoverable terminal sessions and full PTY/ANSI screen behavior, richer
-permission rules, full ACP permission/elicitation/MCP/tool-presentation parity,
-MCP OAuth/subscriptions/legacy SSE, remote skill sources
-and full-screen skill management, full subagent notification/identity/replay
+permission rules, MCP OAuth/subscriptions/status, remote skill sources
+and full-screen skill management, full subagent notification/identity/relationship-index
 parity, media tools, and the full-screen UI remain fx parity work. The implemented terminal boundary is documented in
 [`docs/terminal-parity.md`](docs/terminal-parity.md). The session/streaming
 subset and its explicit limits are in
