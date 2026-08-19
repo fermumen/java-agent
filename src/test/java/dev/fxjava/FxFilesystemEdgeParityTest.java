@@ -48,8 +48,10 @@ class FxFilesystemEdgeParityTest {
                 .contains("extension: " + path("dir/index") + "\n"));
         assertTrue(named("file_info").execute(args("path", ".bashrc"))
                 .contains("extension: bashrc\n"));
-        assertTrue(named("file_info").execute(args("path", "foo."))
-                .contains("extension: \n"));
+        if (!windows()) {
+            assertTrue(named("file_info").execute(args("path", "foo."))
+                    .contains("extension: \n"));
+        }
         assertTrue(Files.exists(parentDot) && Files.exists(hidden) && Files.exists(trailing));
     }
 
@@ -132,6 +134,10 @@ class FxFilesystemEdgeParityTest {
             else result.put(field, (String) value);
         }
         return result;
+    }
+
+    private static boolean windows() {
+        return System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("windows");
     }
 
     private static String path(String value) {

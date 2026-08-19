@@ -108,9 +108,9 @@ class FxCoreFilesystemContractTest {
     void writeAndEditPortTypedInputsUniqueReplacementAndLimits() throws Exception {
         Tool write = named("write_file");
         Tool edit = named("edit_file");
-        assertEquals("wrote nested/file.txt",
+        assertEquals("wrote " + path("nested/file.txt"),
                 write.execute(args("path", path("nested/file.txt"), "content", "old value\n")));
-        assertEquals("edited nested/file.txt", edit.execute(args(
+        assertEquals("edited " + path("nested/file.txt"), edit.execute(args(
                 "path", path("nested/file.txt"), "old_string", "old", "new_string", "new")));
         assertEquals("new value\n", Files.readString(workspace.resolve("nested/file.txt")));
 

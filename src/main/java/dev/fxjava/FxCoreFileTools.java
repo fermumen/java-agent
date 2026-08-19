@@ -118,7 +118,8 @@ final class FxCoreFileTools {
             int end = Math.min(total, start - 1 + count);
             int width = end <= 0 ? 1 : Integer.toString(end).length();
             for (int index = start - 1; index < end; index++) {
-                output.append(String.format(Locale.ROOT, "%" + width + "d\t%s%n", index + 1, split[index]));
+                output.append(String.format(Locale.ROOT, "%" + width + "d\t%s", index + 1, split[index]))
+                        .append('\n');
             }
             int shown = Math.max(0, end - (start - 1));
             if (start != 1 || shown < total) {

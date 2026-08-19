@@ -70,9 +70,19 @@ final class SkillManager {
         if (Files.isSymbolicLink(managedRoot) || !Files.isDirectory(managedRoot, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("Managed skills root is missing or unsafe: " + managedRoot);
         }
-        Path real = managedRoot.toRealPath();
-        if (!real.equals(managedRoot)) throw new IOException("Managed skills root traverses a symlink: " + managedRoot);
-        return real;
+        if (traversesSymlink(managedRoot)) {
+            throw new IOException("Managed skills root traverses a symlink: " + managedRoot);
+        }
+        return managedRoot.toRealPath();
+    }
+
+    private static boolean traversesSymlink(Path path) {
+        Path current = path.getRoot();
+        for (Path component : path) {
+            current = current == null ? component : current.resolve(component);
+            if (Files.isSymbolicLink(current)) return true;
+        }
+        return false;
     }
 
     private static void requireName(String name) {

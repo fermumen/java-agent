@@ -296,8 +296,8 @@ final class TerminalTool implements Tool {
         TerminalSession session = session(text(arguments, "session_id"));
         String signal = text(arguments, "signal");
         switch (signal) {
-            case "kill" -> session.process.destroyForcibly();
-            case "hangup", "interrupt", "quit", "terminate" -> session.process.destroy();
+            case "kill" -> terminate(session, true);
+            case "hangup", "interrupt", "quit", "terminate" -> terminate(session, false);
             default -> throw new IllegalArgumentException("terminal signal arguments are invalid: InvalidSignal");
         }
         session.lastSignal = signal;
@@ -311,17 +311,40 @@ final class TerminalTool implements Tool {
     private String close(ObjectNode arguments) throws Exception {
         TerminalSession session = session(text(arguments, "session_id"));
         String policy = text(arguments, "close_policy");
-        if (policy.equals("force")) session.process.destroyForcibly();
-        else if (policy.equals("graceful")) {
-            session.process.destroy();
-            if (!session.process.waitFor(250, TimeUnit.MILLISECONDS)) session.process.destroyForcibly();
-        } else throw new IllegalArgumentException("terminal close arguments are invalid: InvalidClosePolicy");
+        if (!policy.equals("force") && !policy.equals("graceful")) {
+            throw new IllegalArgumentException("terminal close arguments are invalid: InvalidClosePolicy");
+        }
         session.closed = true;
+        terminate(session, policy.equals("force"));
         Success response = success("close");
         response.body.set("session", facts(session));
         response.body.put("policy", policy);
         synchronized (sessions) { sessions.remove(session.id); }
         return stringify(response.root);
+    }
+
+    private static void terminate(TerminalSession session, boolean force)
+            throws IOException, InterruptedException {
+        List<ProcessHandle> descendants = session.process.descendants().toList();
+        synchronized (session.stdin) {
+            try { session.stdin.close(); } catch (IOException ignored) { }
+        }
+        if (force) {
+            descendants.forEach(ProcessHandle::destroyForcibly);
+            session.process.destroyForcibly();
+        } else {
+            session.process.destroy();
+            descendants.forEach(ProcessHandle::destroy);
+        }
+        if (!session.process.waitFor(2, TimeUnit.SECONDS)) {
+            descendants.forEach(ProcessHandle::destroyForcibly);
+            session.process.destroyForcibly();
+            session.process.waitFor(2, TimeUnit.SECONDS);
+        }
+        session.joinReader();
+        if (session.monitorThread != null && session.monitorThread != Thread.currentThread()) {
+            session.monitorThread.join(2_000);
+        }
     }
 
     private ObjectNode awaitCondition(TerminalSession session, JsonNode condition, long ceilingMs)

@@ -82,9 +82,11 @@ class TerminalToolContractTest {
         JsonNode started = call(terminal, args("action", "start", "command", command));
         String id = started.path("success").path("start").path("session").path("session_id").asText();
 
-        ObjectNode payload = json.createObjectNode().put("kind", "text").put("text", "hello\n");
+        ObjectNode payload = json.createObjectNode().put("kind", "text")
+                .put("text", windows() ? "hello\r\n" : "hello\n");
         JsonNode written = call(terminal, args("action", "write", "session_id", id, "write", payload));
-        assertEquals(6, written.path("success").path("write").path("accepted_bytes").asInt());
+        assertEquals(windows() ? 7 : 6, written.path("success").path("write")
+                .path("accepted_bytes").asInt());
         call(terminal, args("action", "wait", "session_id", id,
                 "return_when", json.createObjectNode().put("kind", "exit"), "wait_ceiling_ms", 5_000));
 

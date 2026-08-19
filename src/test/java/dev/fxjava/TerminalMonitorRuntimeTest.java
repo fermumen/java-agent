@@ -30,7 +30,7 @@ class TerminalMonitorRuntimeTest {
                 .add(definition(condition("process_exit"), "until_session_end"))
                 .add(definition(condition("exit_code").put("exit_code", 17), "until_session_end"))
                 .add(definition(condition("output_matches").put("pattern", "monitor-*ready"), "until_session_end"));
-        String command = windows() ? "<nul set /p=monitor- & <nul set /p=ready & exit /b 17"
+        String command = windows() ? "set /p \"=monitor-\" <nul & set /p \"=ready\" <nul & exit /b 17"
                 : "printf monitor-; sleep 0.05; printf ready; exit 17";
         JsonNode started = call(terminal, args("action", "start", "command", command,
                 "initial_monitors", definitions, "return_when", json.createObjectNode().put("kind", "exit"),

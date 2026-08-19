@@ -102,7 +102,7 @@ public final class Main {
         try (SubagentManager subagents = new SubagentManager(json, child ->
                 new SubagentAgentRunner(json, config.apiKey(), config.baseUrl(), config.model(),
                         config.workspace(), config.maxSteps(), sessionRoot, childTools, approval, error, child),
-                permissionMode, sessionRoot)) {
+                permissionMode, options.noSave ? null : sessionRoot)) {
         agentTools.add(new SubagentTool(subagents));
         childTools.set(List.copyOf(agentTools));
         subagents.restore();
