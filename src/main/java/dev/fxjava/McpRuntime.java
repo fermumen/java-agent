@@ -40,11 +40,13 @@ final class McpRuntime implements AutoCloseable {
     private final ObjectMapper json;
     private final List<Server> servers;
     private final List<Tool> tools;
+    private final List<HealthEntry> health;
     private volatile List<McpTool> remoteTools;
 
-    private McpRuntime(ObjectMapper json, List<Server> servers, List<Tool> tools) {
+    private McpRuntime(ObjectMapper json, List<Server> servers, List<Tool> tools, List<HealthEntry> health) {
         this.json = json;
         this.servers = List.copyOf(servers);
+        this.health = List.copyOf(health);
         List<Tool> catalog = new ArrayList<>();
         if (!servers.isEmpty()) catalog.addAll(McpMetaTools.create(this));
         catalog.addAll(tools);
@@ -54,21 +56,34 @@ final class McpRuntime implements AutoCloseable {
     }
 
     static McpRuntime load(ObjectMapper json, Path configPath) throws IOException {
-        if (!Files.exists(configPath)) return new McpRuntime(json, List.of(), List.of());
+        return load(json, configPath, false);
+    }
+
+    static McpRuntime inspect(ObjectMapper json, Path configPath) throws IOException {
+        return load(json, configPath, true);
+    }
+
+    private static McpRuntime load(ObjectMapper json, Path configPath, boolean tolerateRequired) throws IOException {
+        if (!Files.exists(configPath)) return new McpRuntime(json, List.of(), List.of(), List.of());
         JsonNode root = json.readTree(Files.readString(configPath, StandardCharsets.UTF_8));
         if (!root.isObject()) throw new IOException("MCP config must be a JSON object");
         JsonNode configured = root.path("mcp");
-        if (configured.isMissingNode()) return new McpRuntime(json, List.of(), List.of());
+        if (configured.isMissingNode()) return new McpRuntime(json, List.of(), List.of(), List.of());
         if (!configured.isObject() || configured.size() > MAX_SERVERS) {
             throw new IOException("MCP config must contain at most " + MAX_SERVERS + " servers");
         }
         List<Server> servers = new ArrayList<>();
         List<Tool> tools = new ArrayList<>();
+        List<HealthEntry> health = new ArrayList<>();
         Set<String> publicNames = new HashSet<>();
         try {
             for (var entry : configured.properties()) {
                 ServerConfig config = parseConfig(entry.getKey(), entry.getValue());
-                if (!config.enabled()) continue;
+                if (!config.enabled()) {
+                    health.add(new HealthEntry(config.name(), config.type(), config.required(),
+                            "disabled", null, null));
+                    continue;
+                }
                 Server server = new Server(json, config);
                 try {
                     server.start();
@@ -84,15 +99,19 @@ final class McpRuntime implements AutoCloseable {
                     publicNames.addAll(discoveredNames);
                     tools.addAll(discovered);
                     servers.add(server);
+                    health.add(new HealthEntry(config.name(), config.type(), config.required(),
+                            "ready", null, server));
                 } catch (Exception startupFailure) {
                     server.close();
-                    if (config.required()) {
+                    health.add(new HealthEntry(config.name(), config.type(), config.required(),
+                            "failed", safeHealthError(startupFailure), null));
+                    if (config.required() && !tolerateRequired) {
                         if (startupFailure instanceof IOException io) throw io;
                         throw new IOException("Required MCP server failed: " + config.name(), startupFailure);
                     }
                 }
             }
-            return new McpRuntime(json, servers, tools);
+            return new McpRuntime(json, servers, tools, health);
         } catch (Exception failure) {
             for (Server server : servers) server.close();
             if (failure instanceof IOException io) throw io;
@@ -103,6 +122,62 @@ final class McpRuntime implements AutoCloseable {
     List<Tool> tools() {
         return tools;
     }
+
+    ObjectNode healthReport() {
+        ObjectNode report = json.createObjectNode();
+        ArrayNode entries = report.putArray("servers");
+        int ready = 0;
+        int failed = 0;
+        int disabled = 0;
+        for (HealthEntry entry : health) {
+            if (entry.connection().equals("ready")) ready++;
+            else if (entry.connection().equals("failed")) failed++;
+            else if (entry.connection().equals("disabled")) disabled++;
+            ObjectNode value = entries.addObject().put("name", entry.name())
+                    .put("transport", entry.transport()).put("required", entry.required())
+                    .put("connection", entry.connection());
+            if (entry.server() == null) {
+                value.putNull("protocol_version").put("tools", 0).put("listener", "unavailable");
+            } else {
+                value.put("protocol_version", entry.server().protocolVersion);
+                value.put("tools", (int) remoteTools.stream()
+                        .filter(tool -> tool.server == entry.server()).count());
+                value.put("listener", entry.server().listenerState());
+            }
+            if (entry.error() == null) value.putNull("error"); else value.put("error", entry.error());
+        }
+        report.put("count", health.size()).put("ready", ready).put("failed", failed).put("disabled", disabled);
+        return report;
+    }
+
+    String healthText() {
+        ObjectNode report = healthReport();
+        int count = report.path("count").asInt();
+        StringBuilder text = new StringBuilder("MCP health (").append(count)
+                .append(count == 1 ? " server):\n" : " servers):\n");
+        for (JsonNode server : report.path("servers")) {
+            text.append("- ").append(server.path("name").asText())
+                    .append(" connection=").append(server.path("connection").asText())
+                    .append(" transport=").append(server.path("transport").asText())
+                    .append(" protocol=").append(server.path("protocol_version").asText("unknown"))
+                    .append(" tools=").append(server.path("tools").asInt())
+                    .append(" listener=").append(server.path("listener").asText());
+            if (server.path("required").asBoolean()) text.append(" required");
+            if (server.path("error").isTextual()) text.append(" error=").append(server.path("error").asText());
+            text.append('\n');
+        }
+        return text.toString();
+    }
+
+    private static String safeHealthError(Exception failure) {
+        String message = failure.getMessage();
+        if (message == null || message.isBlank()) message = failure.getClass().getSimpleName();
+        message = message.replaceAll("[\r\n]+", " ");
+        return message.length() <= 300 ? message : message.substring(0, 300) + "...";
+    }
+
+    private record HealthEntry(String name, String transport, boolean required,
+                               String connection, String error, Server server) { }
 
     record McpToolInfo(String publicName, String server, String remoteName, String description,
                        ObjectNode schema, boolean readOnly) { }
@@ -390,6 +465,8 @@ final class McpRuntime implements AutoCloseable {
         private URI endpoint;
         private SseInput eventStream;
         private volatile SseInput listenerStream;
+        private volatile boolean listenerAttempted;
+        private volatile boolean listenerFinished;
         private final AtomicBoolean toolsChanged = new AtomicBoolean();
         private String sessionId;
         private String protocolVersion = "2025-06-18";
@@ -611,6 +688,8 @@ final class McpRuntime implements AutoCloseable {
         }
 
         private void startStreamableListener() {
+            listenerAttempted = true;
+            listenerFinished = false;
             SseInput previous = listenerStream;
             if (previous != null) {
                 try { previous.close(); } catch (IOException ignored) { }
@@ -645,6 +724,7 @@ final class McpRuntime implements AutoCloseable {
                 } catch (Exception ignored) {
                     // Listener support is optional; requests continue over POST.
                 } finally {
+                    listenerFinished = true;
                     if (listenerStream == active) listenerStream = null;
                     if (active != null) try { active.close(); } catch (IOException ignored) { }
                 }
@@ -890,6 +970,14 @@ final class McpRuntime implements AutoCloseable {
             try (var input = child.getErrorStream()) {
                 input.transferTo(java.io.OutputStream.nullOutputStream());
             } catch (IOException ignored) { }
+        }
+
+        private String listenerState() {
+            if (config.type().equals("sse")) return eventStream == null ? "stopped" : "active";
+            if (!config.type().equals("http") || sessionId == null) return "unavailable";
+            if (listenerStream != null) return "active";
+            if (!listenerAttempted) return "unavailable";
+            return listenerFinished ? "stopped" : "starting";
         }
 
         @Override

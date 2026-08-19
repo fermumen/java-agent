@@ -25,7 +25,9 @@ standard corporate JVM proxy and trust-store settings continue to apply.
 - fx-compatible persistent memory plus session-scoped large tool-result previews, bounded paging, and literal search
 - Interactive FX-shaped multiple-choice clarification with a noninteractive sentinel
 - Direct bounded public `web_fetch` with redirect revalidation, HTML text conversion, caching, and credential redaction
-- MCP stdio and Streamable HTTP tools, metadata search/selection, resources, prompts, completion, strict validation, and health policy
+- MCP stdio, Streamable HTTP, and deprecated HTTP+SSE tools, live catalog refresh,
+  metadata search/selection, resources, prompts, completion, strict validation,
+  health policy, and no-auth status reporting
 - Captured `run_command` execution with a timeout and bounded output
 - FX-shaped `terminal` actions for captured exec, bounded background-process
   lifecycles, plain-output screen snapshots, and process-lifetime monitors
@@ -35,7 +37,7 @@ standard corporate JVM proxy and trust-store settings continue to apply.
   durable conversations, explicit restart resume, and authority clamping
 - ACP v1 stdio mode with durable sessions, incremental Responses output,
   cancellation, model/mode configuration, and bounded JSON-RPC framing
-- Read-only `status`, `permissions`, `doctor`, and paginated `sessions` commands
+- Read-only `status`, `permissions`, `doctor`, `mcp list`, and paginated `sessions` commands
 - `ask`, conservative `auto`, and unrestricted `yolo` permission modes (`--yes` remains an alias)
 - A bounded agent loop and exact `function_call`/`function_call_output` pairing
 
@@ -68,6 +70,13 @@ Manage local skills without an API key:
 java -jar target/java-agent.jar skills list
 java -jar target/java-agent.jar skills create review
 java -jar target/java-agent.jar skills install C:\path\to\skill-pack --skill=review
+```
+
+Inspect configured MCP servers without an OpenAI API key:
+
+```sh
+java -jar target/java-agent.jar mcp list
+java -jar target/java-agent.jar mcp list --json
 ```
 
 Permit file mutations and shell commands without interactive confirmation:
@@ -108,7 +117,7 @@ keep confirmation enabled and use your corporate sandbox where appropriate.
 
 Gateway support and further ACP parity are intentionally excluded. The existing compact ACP mode remains available for compatibility. Responses compaction,
 crash-recoverable terminal sessions and full PTY/ANSI screen behavior, richer
-permission rules, MCP OAuth/subscriptions/status, remote skill sources
+permission rules, MCP OAuth/filtered subscriptions, remote skill sources
 and full-screen skill management, full subagent notification/identity/relationship-index
 parity, media tools, and the full-screen UI remain fx parity work. The implemented terminal boundary is documented in
 [`docs/terminal-parity.md`](docs/terminal-parity.md). The session/streaming

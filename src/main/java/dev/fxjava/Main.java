@@ -119,7 +119,7 @@ public final class Main {
         out.println("java-agent " + VERSION + " | Responses API | " + config.model()
                 + " | " + config.workspace());
         if (session.id() != null) out.println("Session: " + session.id());
-        out.println("Enter a request. Commands: /new, /clear, /sessions, /resume <id|last>, /recover <id>, /rename <title>, /exit");
+        out.println("Enter a request. Commands: /new, /clear, /sessions, /resume <id|last>, /recover <id>, /rename <title>, /mcp list, /exit");
         while (true) {
             out.print("> ");
             out.flush();
@@ -156,6 +156,8 @@ public final class Main {
             } else if (line.startsWith("/rename ")) {
                 session.rename(line.substring("/rename ".length()));
                 out.println("Session renamed.");
+            } else if (line.equals("/mcp") || line.equals("/mcp list")) {
+                out.print(mcp.healthText());
             } else if (!line.isBlank()) {
                 try {
                     writeAnswer(session, line, out, false, json);
@@ -265,6 +267,23 @@ public final class Main {
                 Path workspace = options.workspace == null ? Path.of("") : Path.of(options.workspace);
                 SkillsCommand.populate(result, options.prompt, workspace, root, json);
             }
+            case "mcp" -> {
+                String action = options.prompt.trim();
+                if (!action.isEmpty() && !action.equals("list") && !action.equals("status")) {
+                    throw new IllegalArgumentException("Usage: mcp [list|status]");
+                }
+                String configured = firstNonBlank(options.sessionRoot, environment.get("JAVA_AGENT_HOME"));
+                Path root = configured == null ? Path.of(System.getProperty("user.home"), ".java-agent")
+                        : Path.of(configured);
+                Path config = options.mcpConfig == null ? root.resolve("mcp.json") : Path.of(options.mcpConfig);
+                try (McpRuntime runtime = McpRuntime.inspect(json, config)) {
+                    if (!options.json) {
+                        out.print(runtime.healthText());
+                        return 0;
+                    }
+                    result.setAll(runtime.healthReport());
+                }
+            }
             default -> throw new IllegalArgumentException("Unknown command: " + options.command);
         }
         if (options.json) out.println(json.writeValueAsString(result));
@@ -347,6 +366,7 @@ public final class Main {
                   java -jar target/java-agent.jar [options] [ask] [prompt]
                   java -jar target/java-agent.jar [options] acp
                   java -jar target/java-agent.jar [options] skills [list|show|create|remove|install|path] [value]
+                  java -jar target/java-agent.jar [options] mcp [list|status]
 
                 Options:
                   --model <id>          OpenAI model (env: OPENAI_MODEL; default: gpt-5.6)
@@ -375,6 +395,7 @@ public final class Main {
                   java -jar target/java-agent.jar
                   java -jar target/java-agent.jar ask "Explain this repository"
                   java -jar target/java-agent.jar skills list
+                  java -jar target/java-agent.jar mcp list
                   java -jar target/java-agent.jar --auto "Explain an external file"
                   java -jar target/java-agent.jar --yolo "Fix the failing tests"
                 """;
@@ -417,7 +438,7 @@ public final class Main {
                         if (prompt.isEmpty() && result.command == null) result.explicitAsk = true;
                         else prompt.add(argument);
                     }
-                    case "status", "permissions", "doctor", "sessions", "skills", "acp" -> {
+                    case "status", "permissions", "doctor", "sessions", "skills", "mcp", "acp" -> {
                         if (!result.explicitAsk && prompt.isEmpty() && result.command == null) result.command = argument;
                         else prompt.add(argument);
                     }

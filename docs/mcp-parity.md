@@ -34,14 +34,18 @@ The source owners are `fx/src/builtins/mcp.zig`,
   ambiguous request;
 - optional-server degradation, required-server failure, API-key stripping, and
   deterministic child-process teardown.
+- no-auth `mcp list` JSON/human health views plus interactive `/mcp list`, with
+  connection, transport, required policy, negotiated protocol, tool count, and
+  listener state; diagnostic inspection reports required-server failures
+  without weakening normal startup policy.
 
 The main owners are `McpRuntimeTest`, `McpValidationTest`,
 `McpHealthPolicyTest`, `McpHttpRuntimeTest`, `McpHttpListenerTest`,
 `McpLegacyHttpSseTest`, and
-`MainMcpIntegrationTest`.
+`MainMcpIntegrationTest`, plus `McpStatusCommandTest` for the status surfaces.
 
 ## Remaining MCP work
 
-MCP OAuth/credential storage, resource subscriptions, automatic expired-request replay, server elicitation, live reload,
-and health/status commands remain unimplemented. These are not counted as
-parity yet.
+MCP OAuth/credential storage, modern filtered subscriptions/listening,
+automatic expired-request replay, server elicitation, and config live reload
+remain unimplemented. These are not counted as parity yet.

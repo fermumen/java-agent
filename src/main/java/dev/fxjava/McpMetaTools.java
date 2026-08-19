@@ -96,11 +96,11 @@ final class McpMetaTools {
             throw new IOException("Unknown MCP tool: " + name);
         }
 
-         public Tool resolveDynamicTool(String name) throws IOException {
+        @Override public Tool resolveDynamicTool(String name) throws IOException {
             return runtime.dynamicTool(name);
         }
 
-         public List<Tool> dynamicTools() throws IOException {
+        @Override public List<Tool> dynamicTools() throws IOException {
             return runtime.selectedTools();
         }
     }
