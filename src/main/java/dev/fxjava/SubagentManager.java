@@ -22,6 +22,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
+import java.util.function.LongSupplier;
 
 /** Bounded asynchronous child-session manager behind the fx-shaped subagent tool. */
 final class SubagentManager implements AutoCloseable {
@@ -37,6 +38,7 @@ final class SubagentManager implements AutoCloseable {
     private final PermissionMode parentPermission;
     private final ExecutorService executor;
     private final SubagentStateStore stateStore;
+    private final LongSupplier clock;
     private final Map<String, Child> children = new LinkedHashMap<>();
     private final LinkedHashMap<String, OperationReplay> operations = new LinkedHashMap<>();
     private final Object operationMutex = new Object();
@@ -46,10 +48,16 @@ final class SubagentManager implements AutoCloseable {
     }
 
     SubagentManager(ObjectMapper json, ChildFactory childFactory, PermissionMode parentPermission, Path stateRoot) {
+        this(json, childFactory, parentPermission, stateRoot, System::currentTimeMillis);
+    }
+
+    SubagentManager(ObjectMapper json, ChildFactory childFactory, PermissionMode parentPermission, Path stateRoot,
+                    LongSupplier clock) {
         this.json = json;
         this.childFactory = childFactory;
         this.parentPermission = parentPermission;
         this.stateStore = new SubagentStateStore(json, stateRoot);
+        this.clock = clock;
         ThreadFactory threads = task -> {
             Thread thread = new Thread(task, "java-agent-subagent");
             thread.setDaemon(true);
@@ -92,6 +100,10 @@ final class SubagentManager implements AutoCloseable {
             child.generation = Math.max(1, saved.path("generation").asLong(1));
             child.eventSequence = Math.max(0, saved.path("event_sequence").asLong());
             child.parentDeliverySequence = Math.max(0, saved.path("parent_delivery_sequence").asLong());
+            child.notificationWorkStartedAt = saved.path("notification_work_started_at_ms").asLong(-1);
+            child.notificationIntervalTick = Math.max(0, saved.path("notification_interval_tick").asLong());
+            child.notificationIntervalStopped = saved.path("notification_interval_stopped").asBoolean();
+            child.notificationWorkState = saved.path("notification_work_state").asText("idle");
             for (JsonNode message : saved.path("messages")) {
                 if (child.messages.size() >= MAX_MESSAGES) break;
                 child.messages.add(new Message(message.path("role").asText(), message.path("content").asText(),
@@ -119,7 +131,11 @@ final class SubagentManager implements AutoCloseable {
                 .put("name", child.name).put("mode", child.mode).put("state", child.state)
                 .put("archived_from", child.archivedFrom).put("generation", child.generation)
                 .put("event_sequence", child.eventSequence)
-                .put("parent_delivery_sequence", child.parentDeliverySequence);
+                .put("parent_delivery_sequence", child.parentDeliverySequence)
+                .put("notification_work_started_at_ms", child.notificationWorkStartedAt)
+                .put("notification_interval_tick", child.notificationIntervalTick)
+                .put("notification_interval_stopped", child.notificationIntervalStopped)
+                .put("notification_work_state", child.notificationWorkState);
         if (child.parentId == null) saved.putNull("parent_id"); else saved.put("parent_id", child.parentId);
         if (child.failure == null) saved.putNull("failure"); else saved.put("failure", child.failure);
         saved.set("configuration", configuration(child));
@@ -143,8 +159,7 @@ final class SubagentManager implements AutoCloseable {
         try {
             persist(child);
         } catch (Exception failure) {
-            child.failure = "persistence_failed: " + (failure.getMessage() == null
-                    ? failure.getClass().getSimpleName() : failure.getMessage());
+            child.failure = safeFailure("persistence_failed: ", failure);
             child.state = "failed";
         }
     }
@@ -162,6 +177,7 @@ final class SubagentManager implements AutoCloseable {
         for (Child child : ordered) {
             synchronized (child) {
                 if (!parentId.equals(child.parentId)) continue;
+                materializeInterval(child, parentId, clock.getAsLong());
                 for (JsonNode event : child.events) {
                     long sequence = event.path("sequence").asLong();
                     if (sequence <= child.parentDeliverySequence || !isParentDelivery(event, parentId)) continue;
@@ -220,7 +236,8 @@ final class SubagentManager implements AutoCloseable {
     private boolean isParentDelivery(JsonNode event, String parentId) {
         if (!event.path("target_parent_id").asText("").equals(parentId)) return false;
         return event.path("kind").asText().equals("milestone_emitted")
-                || event.path("kind").asText().equals("terminal_notification");
+                || event.path("kind").asText().equals("terminal_notification")
+                || event.path("kind").asText().equals("interval_notification");
     }
 
     private ObjectNode renderParentDelivery(Child child, JsonNode event) {
@@ -230,13 +247,64 @@ final class SubagentManager implements AutoCloseable {
                 .put("timestamp_ms", event.path("created_at_ms").asLong());
         if (event.path("kind").asText().equals("milestone_emitted")) {
             delivery.put("kind", "milestone").put("name", event.path("name").asText());
-        } else {
+        } else if (event.path("kind").asText().equals("terminal_notification")) {
             delivery.put("kind", "terminal").put("terminal", event.path("terminal").asText());
             if (event.path("failure_reason").isTextual()) {
                 delivery.put("failure_reason", event.path("failure_reason").asText());
             }
+        } else {
+            delivery.put("kind", "interval").put("state", event.path("state").asText())
+                    .put("coalesced_ticks", event.path("coalesced_ticks").asLong());
         }
         return delivery;
+    }
+
+    private void materializeInterval(Child child, String parentId, long now) throws IOException {
+        if (child.notificationIntervalStopped || child.notificationWorkStartedAt < 0) return;
+        long interval = child.notifications.path("report_interval_ms").asLong(0);
+        if (interval <= 0) return;
+        long duration = child.notifications.path("report_duration_ms").asLong(0);
+        boolean durationStopped = duration > 0 && elapsed(now, child.notificationWorkStartedAt) >= duration;
+        boolean terminalStopped = terminalStopEnabled(child)
+                && Set.of("completed", "failed", "cancelled").contains(child.notificationWorkState);
+        if (durationStopped || terminalStopped) {
+            child.notificationIntervalStopped = true;
+            persistInterval(child);
+            return;
+        }
+        long dueTick = elapsed(now, child.notificationWorkStartedAt) / interval;
+        if (dueTick <= child.notificationIntervalTick) return;
+        long coalesced = dueTick - child.notificationIntervalTick;
+        child.notificationIntervalTick = dueTick;
+        child.generation++;
+        child.events.addObject().put("sequence", ++child.eventSequence)
+                .put("kind", "interval_notification").put("state", child.notificationWorkState)
+                .put("coalesced_ticks", coalesced).put("source_child_id", child.id)
+                .put("target_parent_id", parentId).put("created_at_ms", now);
+        if (child.events.size() > MAX_EVENTS) child.events.remove(0);
+        persistInterval(child);
+        child.notifyAll();
+    }
+
+    private void persistInterval(Child child) throws IOException {
+        try {
+            persist(child);
+        } catch (IOException failure) {
+            throw failure;
+        } catch (Exception failure) {
+            throw new IOException("could not persist interval notification", failure);
+        }
+    }
+
+    private boolean terminalStopEnabled(Child child) {
+        JsonNode stops = child.notifications.get("stop_conditions");
+        if (stops == null) return true;
+        for (JsonNode stop : stops) if (stop.asText().equals("terminal")) return true;
+        return false;
+    }
+
+    private static long elapsed(long now, long started) {
+        return now <= started ? 0 : now - started;
     }
 
     private String renderParentEnvelope(ArrayNode deliveries) throws IOException {
@@ -449,6 +517,9 @@ final class SubagentManager implements AutoCloseable {
     private String configure(String operationId, ObjectNode value) throws Exception {
         Child child = child(value.path("id").asText());
         synchronized (child) {
+            if (!child.state.equals("idle")) {
+                throw new SubagentFailure(child.id, "invalid_state", false);
+            }
             String name = value.path("name").isTextual() ? value.path("name").asText() : child.configuration.name();
             String model = value.path("model").isTextual() ? value.path("model").asText() : child.configuration.model();
             String effort = value.path("effort").isTextual() ? value.path("effort").asText() : child.configuration.effort();
@@ -526,6 +597,7 @@ final class SubagentManager implements AutoCloseable {
                     }
                     if (child.future != null) child.future.cancel(true);
                     child.state = child.mode.equals("persistent") ? "idle" : "cancelled";
+                    child.notificationWorkState = "cancelled";
                     child.currentPrompt = null;
                     cancelled = true;
                 }
@@ -569,6 +641,10 @@ final class SubagentManager implements AutoCloseable {
         String prompt = child.queue.remove();
         child.currentPrompt = prompt;
         child.emittedMilestones.clear();
+        child.notificationWorkStartedAt = -1;
+        child.notificationIntervalTick = 0;
+        child.notificationIntervalStopped = false;
+        child.notificationWorkState = "queued";
         child.state = "queued";
         changed(child, "queued");
         child.future = executor.submit(() -> run(child, prompt));
@@ -578,6 +654,8 @@ final class SubagentManager implements AutoCloseable {
         synchronized (child) {
             if (child.state.equals("archived")) return;
             child.state = "running";
+            child.notificationWorkStartedAt = clock.getAsLong();
+            child.notificationWorkState = "running";
             changed(child, "running");
         }
         try {
@@ -590,6 +668,7 @@ final class SubagentManager implements AutoCloseable {
                     child.toolActivity.addObject().put("name", activity.name()).put("status", activity.status());
                 }
                 child.failure = null;
+                child.notificationWorkState = "completed";
                 child.state = child.mode.equals("one_off") ? "completed" : "idle";
                 changed(child, child.state);
                 notifyTerminal(child, "completed");
@@ -605,8 +684,9 @@ final class SubagentManager implements AutoCloseable {
             }
         } catch (Exception failure) {
             synchronized (child) {
-                child.failure = failure.getMessage() == null ? failure.getClass().getSimpleName() : failure.getMessage();
+                child.failure = safeFailure("", failure);
                 child.currentPrompt = null;
+                child.notificationWorkState = "failed";
                 child.state = "failed";
                 changed(child, "failed");
                 notifyTerminal(child, "failed");
@@ -749,6 +829,13 @@ final class SubagentManager implements AutoCloseable {
         return configured == null || configured.asBoolean();
     }
 
+    private static String safeFailure(String prefix, Throwable failure) {
+        String detail = failure.getMessage() == null || failure.getMessage().isBlank()
+                ? failure.getClass().getSimpleName() : failure.getMessage();
+        String redacted = SecretRedactor.mask(prefix + detail);
+        return redacted.length() <= 1024 ? redacted : redacted.substring(0, 1024);
+    }
+
     private static String operationId(String invocation) {
         if (invocation != null && !invocation.isEmpty() && invocation.length() <= 128
                 && invocation.chars().noneMatch(Character::isWhitespace)) return invocation;
@@ -811,6 +898,10 @@ final class SubagentManager implements AutoCloseable {
         long generation = 1;
         long eventSequence;
         long parentDeliverySequence;
+        long notificationWorkStartedAt = -1;
+        long notificationIntervalTick;
+        boolean notificationIntervalStopped;
+        String notificationWorkState = "idle";
         Future<?> future;
         ObjectNode notifications = json.createObjectNode();
 

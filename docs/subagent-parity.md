@@ -30,6 +30,10 @@ requested projections, and pagination cursor.
   completed/failed/cancelled events, with deterministic direct-child ordering,
   nested delivery, detach/reparent authorization checks, exact replay until
   acknowledgement, durable cursors, and ephemeral model injection;
+- deterministic parent-boundary polling for interval reports, including
+  coalesced missed ticks, durable tick cursors, report-duration stopping,
+  default terminal stopping, and terminal-payload selection independent from
+  the terminal stop condition;
 - bounded canonical operation fingerprints with exact receipt replay,
   changed-request conflict rejection, atomic persistence, restart recovery,
   eviction, and corrupt-ledger isolation.
@@ -38,12 +42,13 @@ The primary Java owners are `SubagentCommandParityTest`,
 `SubagentManagerParityTest`, `SubagentPaginationParityTest`,
 `SubagentPersistenceParityTest`, `SubagentOperationReplayTest`,
 `SubagentToolActivityParityTest`, `SubagentMilestoneParityTest`,
-`SubagentParentDeliveryParityTest`, and `MainSubagentIntegrationTest`.
+`SubagentParentDeliveryParityTest`, `SubagentIntervalNotificationParityTest`,
+and `MainSubagentIntegrationTest`.
 
 ## Remaining subagent work
 
-Interval reports, report-duration stopping, and notification stop conditions
-are validated and persisted but are not yet scheduled. Java deliberately uses
-the already bounded 32-child snapshot set for relationship discovery instead
-of fx's separate paged binary index; attach/detach/reparent, restart recovery,
-cycle rejection, and direct-parent delivery are observable parity contracts.
+Java materializes interval reports when a parent turn polls for trusted context,
+without a separate background scheduler. It deliberately uses the already
+bounded 32-child snapshot set for relationship discovery instead of fx's
+separate paged binary index; attach/detach/reparent, restart recovery, cycle
+rejection, and direct-parent delivery are observable parity contracts.
