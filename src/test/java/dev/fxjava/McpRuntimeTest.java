@@ -78,17 +78,53 @@ class McpRuntimeTest {
         assertTrue(error.getMessage().contains("HTTPS or loopback HTTP"));
     }
 
+    @Test
+    void liveReloadAtomicallyReplacesConfigAndPreservesSelectedIdentity() throws Exception {
+        Path config = writeConfig(true);
+        try (McpRuntime runtime = McpRuntime.load(json, config)) {
+            runtime.selectTool("mcp__fixture__zeta_echo");
+            Tool selected = runtime.selectedTools().get(0);
+
+            writeConfig(config, true, 9_000);
+            assertEquals(2, runtime.toolCatalog().size());
+            assertEquals(List.of("mcp__fixture__zeta_echo"),
+                    runtime.selectedTools().stream().map(Tool::name).toList());
+            assertFalse(selected.advertised());
+
+            writeConfig(config, false, 9_000);
+            assertEquals(1, runtime.healthReport().path("disabled").asInt());
+            assertTrue(runtime.toolCatalog().isEmpty());
+            assertTrue(runtime.selectedTools().isEmpty());
+        }
+    }
+
+    @Test
+    void malformedLiveEditLeavesCurrentRuntimeAvailableForRetry() throws Exception {
+        Path config = writeConfig(true);
+        try (McpRuntime runtime = McpRuntime.load(json, config)) {
+            assertEquals(2, runtime.toolCatalog().size());
+            Files.writeString(config, "{broken");
+            assertThrows(IOException.class, runtime::toolCatalog);
+            writeConfig(config, true, 8_000);
+            assertEquals(2, runtime.toolCatalog().size());
+        }
+    }
+
     private Path writeConfig(boolean enabled) throws Exception {
         Path config = temporary.resolve(enabled ? "enabled.json" : "disabled.json");
+        writeConfig(config, enabled, 10_000);
+        return config;
+    }
+
+    private void writeConfig(Path config, boolean enabled, int operationTimeout) throws Exception {
         ObjectNode root = json.createObjectNode();
         ObjectNode fixture = root.putObject("mcp").putObject("fixture");
         fixture.put("type", "stdio").put("enabled", enabled)
-                .put("startup_timeout_ms", 10_000).put("operation_timeout_ms", 10_000);
+                .put("startup_timeout_ms", 10_000).put("operation_timeout_ms", operationTimeout);
         ArrayNode command = fixture.putArray("command");
         command.add(Path.of(System.getProperty("java.home"), "bin", windows() ? "java.exe" : "java").toString());
         command.add("-cp").add(System.getProperty("java.class.path")).add(FakeMcpServer.class.getName());
         Files.writeString(config, json.writeValueAsString(root));
-        return config;
     }
 
     private static boolean windows() {

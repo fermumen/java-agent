@@ -19,6 +19,8 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -37,13 +39,18 @@ final class McpRuntime implements AutoCloseable {
     private static final int MAX_TOOLS = 4096;
     private static final int MAX_LINE_BYTES = 2 * 1024 * 1024;
     private static final int MAX_RESULT_BYTES = 200 * 1024;
+    private static final int MAX_CONFIG_BYTES = 1024 * 1024;
     private final ObjectMapper json;
-    private final List<Server> servers;
+    private volatile List<Server> servers;
     private final List<Tool> tools;
-    private final List<HealthEntry> health;
+    private volatile List<HealthEntry> health;
     private volatile List<McpTool> remoteTools;
+    private final Path configPath;
+    private final boolean tolerateRequired;
+    private volatile String configFingerprint;
 
-    private McpRuntime(ObjectMapper json, List<Server> servers, List<Tool> tools, List<HealthEntry> health) {
+    private McpRuntime(ObjectMapper json, List<Server> servers, List<Tool> tools, List<HealthEntry> health,
+                       Path configPath, boolean tolerateRequired, String configFingerprint) {
         this.json = json;
         this.servers = List.copyOf(servers);
         this.health = List.copyOf(health);
@@ -53,6 +60,9 @@ final class McpRuntime implements AutoCloseable {
         this.tools = List.copyOf(catalog);
         this.remoteTools = tools.stream().filter(McpTool.class::isInstance)
                 .map(McpTool.class::cast).toList();
+        this.configPath = configPath;
+        this.tolerateRequired = tolerateRequired;
+        this.configFingerprint = configFingerprint;
     }
 
     static McpRuntime load(ObjectMapper json, Path configPath) throws IOException {
@@ -64,11 +74,18 @@ final class McpRuntime implements AutoCloseable {
     }
 
     private static McpRuntime load(ObjectMapper json, Path configPath, boolean tolerateRequired) throws IOException {
-        if (!Files.exists(configPath)) return new McpRuntime(json, List.of(), List.of(), List.of());
-        JsonNode root = json.readTree(Files.readString(configPath, StandardCharsets.UTF_8));
+        String fingerprint = configFingerprint(configPath);
+        if (!Files.exists(configPath)) {
+            return new McpRuntime(json, List.of(), List.of(), List.of(),
+                    configPath, tolerateRequired, fingerprint);
+        }
+        JsonNode root = json.readTree(readConfig(configPath));
         if (!root.isObject()) throw new IOException("MCP config must be a JSON object");
         JsonNode configured = root.path("mcp");
-        if (configured.isMissingNode()) return new McpRuntime(json, List.of(), List.of(), List.of());
+        if (configured.isMissingNode()) {
+            return new McpRuntime(json, List.of(), List.of(), List.of(),
+                    configPath, tolerateRequired, fingerprint);
+        }
         if (!configured.isObject() || configured.size() > MAX_SERVERS) {
             throw new IOException("MCP config must contain at most " + MAX_SERVERS + " servers");
         }
@@ -111,7 +128,8 @@ final class McpRuntime implements AutoCloseable {
                     }
                 }
             }
-            return new McpRuntime(json, servers, tools, health);
+            return new McpRuntime(json, servers, tools, health,
+                    configPath, tolerateRequired, fingerprint);
         } catch (Exception failure) {
             for (Server server : servers) server.close();
             if (failure instanceof IOException io) throw io;
@@ -123,7 +141,8 @@ final class McpRuntime implements AutoCloseable {
         return tools;
     }
 
-    ObjectNode healthReport() {
+    ObjectNode healthReport() throws IOException {
+        refreshChangedServers();
         ObjectNode report = json.createObjectNode();
         ArrayNode entries = report.putArray("servers");
         int ready = 0;
@@ -150,7 +169,7 @@ final class McpRuntime implements AutoCloseable {
         return report;
     }
 
-    String healthText() {
+    String healthText() throws IOException {
         ObjectNode report = healthReport();
         int count = report.path("count").asInt();
         StringBuilder text = new StringBuilder("MCP health (").append(count)
@@ -218,6 +237,7 @@ final class McpRuntime implements AutoCloseable {
     }
 
     private synchronized void refreshChangedServers() throws IOException {
+        refreshConfigIfChanged();
         for (Server server : servers) {
             if (!server.toolsChanged.compareAndSet(true, false)) continue;
             try {
@@ -226,6 +246,53 @@ final class McpRuntime implements AutoCloseable {
                 server.toolsChanged.set(true);
                 throw failure;
             }
+        }
+    }
+
+    private void refreshConfigIfChanged() throws IOException {
+        String observed = configFingerprint(configPath);
+        if (observed.equals(configFingerprint)) return;
+        McpRuntime replacement = load(json, configPath, tolerateRequired);
+        List<Server> superseded;
+        synchronized (this) {
+            observed = configFingerprint(configPath);
+            if (observed.equals(configFingerprint)) {
+                replacement.close();
+                return;
+            }
+            Set<String> selected = new HashSet<>();
+            for (McpTool tool : remoteTools) {
+                if (tool.selected) selected.add(tool.publicName);
+                tool.selected = false;
+            }
+            for (McpTool tool : replacement.remoteTools) {
+                tool.selected = selected.contains(tool.publicName);
+            }
+            superseded = servers;
+            servers = replacement.servers;
+            health = replacement.health;
+            remoteTools = replacement.remoteTools;
+            configFingerprint = replacement.configFingerprint;
+        }
+        for (Server server : superseded) server.close();
+    }
+
+    private static String readConfig(Path path) throws IOException {
+        if (Files.size(path) > MAX_CONFIG_BYTES) {
+            throw new IOException("MCP config exceeds 1 MiB");
+        }
+        return Files.readString(path, StandardCharsets.UTF_8);
+    }
+
+    private static String configFingerprint(Path path) throws IOException {
+        if (!Files.exists(path)) return "missing";
+        byte[] bytes = Files.readAllBytes(path);
+        if (bytes.length > MAX_CONFIG_BYTES) throw new IOException("MCP config exceeds 1 MiB");
+        try {
+            return java.util.HexFormat.of().formatHex(
+                    MessageDigest.getInstance("SHA-256").digest(bytes));
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException(impossible);
         }
     }
 
@@ -252,11 +319,13 @@ final class McpRuntime implements AutoCloseable {
     }
 
     JsonNode featureRequest(String serverName, String method, ObjectNode params) throws IOException {
+        refreshChangedServers();
         Server server = server(serverName);
         return server.request(method, params, server.config.operationTimeoutMs());
     }
 
     JsonNode pagedFeature(String serverName, String method, String arrayField) throws IOException {
+        refreshChangedServers();
         Server server = server(serverName);
         ObjectNode combined = json.createObjectNode();
         ArrayNode values = combined.putArray(arrayField);

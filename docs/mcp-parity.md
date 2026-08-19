@@ -32,6 +32,9 @@ The source owners are `fx/src/builtins/mcp.zig`,
   line size;
 - safe HTTP session-expiry recovery that reinitializes but does not replay an
   ambiguous request;
+- bounded SHA-256 config change detection with replacement transports fully
+  initialized before atomic swap, selected tool identity preservation,
+  superseded transport cleanup, status refresh, and retry after malformed edits;
 - optional-server degradation, required-server failure, API-key stripping, and
   deterministic child-process teardown.
 - no-auth `mcp list` JSON/human health views plus interactive `/mcp list`, with
@@ -47,5 +50,5 @@ The main owners are `McpRuntimeTest`, `McpValidationTest`,
 ## Remaining MCP work
 
 MCP OAuth/credential storage, modern filtered subscriptions/listening,
-automatic expired-request replay, server elicitation, and config live reload
-remain unimplemented. These are not counted as parity yet.
+automatic expired-request replay, and server elicitation remain unimplemented.
+These are not counted as parity yet.
