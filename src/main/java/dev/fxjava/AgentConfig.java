@@ -8,7 +8,7 @@ public record AgentConfig(
         String model,
         Path workspace,
         int maxSteps,
-        boolean approveAll) {
+        PermissionMode permissionMode) {
 
     public AgentConfig {
         if (apiKey == null || apiKey.isBlank()) {
@@ -23,6 +23,21 @@ public record AgentConfig(
         workspace = workspace.toAbsolutePath().normalize();
         if (maxSteps < 1 || maxSteps > 100) {
             throw new IllegalArgumentException("maxSteps must be between 1 and 100");
+        }
+        if (permissionMode == null) throw new IllegalArgumentException("permissionMode is required");
+    }
+
+    public boolean approveAll() { return permissionMode == PermissionMode.YOLO; }
+}
+
+enum PermissionMode {
+    ASK, AUTO, YOLO;
+
+    static PermissionMode parse(String value) {
+        try {
+            return valueOf(value.trim().toUpperCase(java.util.Locale.ROOT));
+        } catch (Exception invalid) {
+            throw new IllegalArgumentException("Permission mode must be ask, auto, or yolo");
         }
     }
 }

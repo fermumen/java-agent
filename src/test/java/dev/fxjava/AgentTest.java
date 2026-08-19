@@ -53,6 +53,18 @@ class AgentTest {
                 client.requests.get(1).path(3).path("output").asText());
     }
 
+    @Test
+    void hostedWebSearchUsesResponsesBuiltInDefinition() throws Exception {
+        FakeClient client = new FakeClient(textResponse("Searched"));
+        Agent agent = new Agent(json, client, List.of(new HostedWebSearchTool()), (tool, arguments) -> false,
+                new PrintStream(new ByteArrayOutputStream()), 2, "system");
+
+        assertEquals("Searched", agent.prompt("Find it"));
+        JsonNode definition = client.toolDefinitions.get(0).path(0);
+        assertEquals("web_search", definition.path("type").asText());
+        assertTrue(!definition.has("name") && !definition.has("parameters"));
+    }
+
     private ObjectNode toolResponse(String callId, String name, String arguments) {
         ObjectNode response = completedResponse();
         ArrayNode output = response.putArray("output");
@@ -82,6 +94,7 @@ class AgentTest {
     private static final class FakeClient implements ResponsesClient {
         private final Queue<ObjectNode> responses = new ArrayDeque<>();
         private final ArrayList<ArrayNode> requests = new ArrayList<>();
+        private final ArrayList<ArrayNode> toolDefinitions = new ArrayList<>();
         private final ArrayList<String> instructions = new ArrayList<>();
 
         FakeClient(ObjectNode... responses) {
@@ -91,6 +104,7 @@ class AgentTest {
         @Override
         public ObjectNode complete(ArrayNode input, ArrayNode tools, String instructions) {
             requests.add(input.deepCopy());
+            toolDefinitions.add(tools.deepCopy());
             this.instructions.add(instructions);
             return responses.remove();
         }

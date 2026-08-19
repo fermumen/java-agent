@@ -10,45 +10,63 @@ import java.io.PrintStream;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.LinkedHashSet;
+import java.util.Set;
 import java.util.Map;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import java.util.function.Consumer;
 
 /** Stateful local agent loop implemented over stateless OpenAI Responses calls. */
 public final class Agent {
     private final ObjectMapper json;
     private final ResponsesClient client;
     private final Map<String, Tool> tools;
-    private final ArrayNode toolDefinitions;
+    private final List<Tool> toolCatalog;
+    private final List<ToolCallRecord> lastToolCalls = new ArrayList<>();
     private final ArrayNode inputHistory;
     private final ApprovalPolicy approvalPolicy;
     private final PrintStream progress;
     private final int maxSteps;
+    private final ToolResultStore resultStore;
     private String instructions;
 
     public Agent(ObjectMapper json, ResponsesClient client, List<Tool> tools,
                  ApprovalPolicy approvalPolicy, PrintStream progress, int maxSteps,
                  String systemPrompt) {
+        this(json, client, tools, approvalPolicy, progress, maxSteps, systemPrompt, null);
+    }
+
+    public Agent(ObjectMapper json, ResponsesClient client, List<Tool> tools,
+                 ApprovalPolicy approvalPolicy, PrintStream progress, int maxSteps,
+                 String systemPrompt, ToolResultStore resultStore) {
         this.json = json;
         this.client = client;
         this.tools = tools.stream().collect(Collectors.toUnmodifiableMap(Tool::name, Function.identity()));
-        this.toolDefinitions = buildToolDefinitions(tools);
+        this.toolCatalog = List.copyOf(tools);
         this.inputHistory = json.createArrayNode();
         this.approvalPolicy = approvalPolicy;
         this.progress = progress;
         this.maxSteps = maxSteps;
         this.instructions = systemPrompt;
+        this.resultStore = resultStore;
     }
 
     public String prompt(String input) throws IOException, InterruptedException {
+        return prompt(input, ignored -> { });
+    }
+
+    public String prompt(String input, Consumer<String> textDelta)
+            throws IOException, InterruptedException {
+        lastToolCalls.clear();
         addUserMessage(input);
         for (int step = 0; step < maxSteps; step++) {
-            ObjectNode response = client.complete(inputHistory.deepCopy(), toolDefinitions.deepCopy(), instructions);
+            ObjectNode response = client.complete(inputHistory.deepCopy(), buildToolDefinitions(toolCatalog), instructions, textDelta);
             ArrayNode output = (ArrayNode) response.path("output");
             List<JsonNode> functionCalls = new ArrayList<>();
 
             for (JsonNode item : output) {
-                inputHistory.add(item.deepCopy());
+                inputHistory.add(persistable(item));
                 if (item.path("type").asText().equals("function_call")) functionCalls.add(item);
             }
 
@@ -58,9 +76,47 @@ public final class Agent {
         throw new IOException("Agent stopped after reaching the " + maxSteps + " step limit");
     }
 
+    public ArrayNode snapshotInput() {
+        return inputHistory.deepCopy();
+    }
+
+    public List<ToolCallRecord> lastToolCalls() {
+        return List.copyOf(lastToolCalls);
+    }
+
+    public String instructions() {
+        return instructions;
+    }
+
+    public void restoreConversation(ArrayNode input, String systemPrompt) {
+        if (input == null || systemPrompt == null) {
+            throw new IllegalArgumentException("session input and instructions are required");
+        }
+        inputHistory.removeAll();
+        for (JsonNode item : input) inputHistory.add(item.deepCopy());
+        repairInterruptedToolCalls();
+        instructions = systemPrompt;
+    }
+
     public void clearConversation(String systemPrompt) {
         inputHistory.removeAll();
         instructions = systemPrompt;
+    }
+
+    private void repairInterruptedToolCalls() {
+        Set<String> pending = new LinkedHashSet<>();
+        for (JsonNode item : inputHistory) {
+            String callId = item.path("call_id").asText();
+            if (callId.isBlank()) continue;
+            if (item.path("type").asText().equals("function_call")) pending.add(callId);
+            if (item.path("type").asText().equals("function_call_output")) pending.remove(callId);
+        }
+        for (String callId : pending) {
+            ObjectNode output = inputHistory.addObject();
+            output.put("type", "function_call_output");
+            output.put("call_id", callId);
+            output.put("output", "Error: previous tool execution was interrupted before completion");
+        }
     }
 
     private void executeToolCall(JsonNode call) throws IOException, InterruptedException {
@@ -71,7 +127,7 @@ public final class Agent {
 
         String result;
         Tool tool = tools.get(name);
-        if (tool == null) {
+        if (tool == null || !tool.advertised()) {
             result = "Error: unknown tool '" + name + "'";
         } else {
             try {
@@ -80,10 +136,10 @@ public final class Agent {
                     throw new IllegalArgumentException("tool arguments must be a JSON object");
                 }
                 progress.println("[tool] " + tool.preview(arguments));
-                if (tool.requiresApproval() && !approvalPolicy.approve(tool, arguments)) {
+                if (tool.requiresApproval(arguments) && !approvalPolicy.approve(tool, arguments)) {
                     result = "Error: user denied this tool call";
                 } else {
-                    result = tool.execute(arguments);
+                    result = tool.execute(arguments, callId);
                 }
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
@@ -93,6 +149,12 @@ public final class Agent {
             }
         }
 
+        boolean toolError = tool == null || tool.isErrorResult(result);
+        if (resultStore != null && !name.equals("read_tool_result")) {
+            result = resultStore.prepare(callId, name, result);
+        }
+
+        lastToolCalls.add(new ToolCallRecord(name, toolError ? "error" : "success"));
         ObjectNode toolOutput = inputHistory.addObject();
         toolOutput.put("type", "function_call_output");
         toolOutput.put("call_id", callId);
@@ -102,11 +164,8 @@ public final class Agent {
     private ArrayNode buildToolDefinitions(List<Tool> availableTools) {
         ArrayNode definitions = json.createArrayNode();
         for (Tool tool : availableTools) {
-            ObjectNode definition = definitions.addObject();
-            definition.put("type", "function");
-            definition.put("name", tool.name());
-            definition.put("description", tool.description());
-            definition.set("parameters", tool.parameters().deepCopy());
+            if (!tool.advertised()) continue;
+            definitions.add(tool.definition(json));
         }
         return definitions;
     }
@@ -115,6 +174,27 @@ public final class Agent {
         ObjectNode message = inputHistory.addObject();
         message.put("role", "user");
         message.put("content", content);
+    }
+
+    private static JsonNode persistable(JsonNode item) {
+        JsonNode copy = item.deepCopy();
+        if (copy instanceof ObjectNode object && object.path("type").asText().equals("function_call")
+                && object.path("name").asText().equals("web_fetch") && object.path("arguments").isTextual()) {
+            String raw = object.path("arguments").asText();
+            int scheme = raw.indexOf("://");
+            int authorityEnd = raw.length();
+            if (scheme >= 0) {
+                for (char delimiter : new char[]{'/', '?', '#', '"'}) {
+                    int found = raw.indexOf(delimiter, scheme + 3);
+                    if (found >= 0) authorityEnd = Math.min(authorityEnd, found);
+                }
+            }
+            int at = scheme < 0 ? -1 : raw.indexOf("@", scheme + 3);
+            if (at > scheme + 3 && at < authorityEnd) {
+                object.put("arguments", raw.substring(0, scheme + 3) + "[redacted]" + raw.substring(at));
+            }
+        }
+        return copy;
     }
 
     private static String extractOutputText(ArrayNode output) {
@@ -141,9 +221,16 @@ public final class Agent {
                 require approval. If a tool fails, reason from the error and choose a safe alternative.
 
                 Workspace: %s
+                Permission mode: %s
                 Current date: %s
-                """.formatted(config.workspace(), LocalDate.now());
+                """.formatted(config.workspace(), config.permissionMode().name().toLowerCase(java.util.Locale.ROOT), LocalDate.now());
     }
+
+    void setToolResultSession(String sessionId) {
+        if (resultStore != null) resultStore.setSession(sessionId);
+    }
+
+    public record ToolCallRecord(String name, String status) { }
 
     private static String safeMessage(Exception error) {
         String message = error.getMessage();

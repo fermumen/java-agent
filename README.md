@@ -11,13 +11,32 @@ standard corporate JVM proxy and trust-store settings continue to apply.
 ## Features
 
 - Direct `POST /v1/responses` integration
+- Structured `ask --json` output with per-turn tool outcomes
 - Interactive sessions and one-shot `ask` mode
+- Native Responses SSE streaming with incremental text output
 - Stateless API requests with `store=false`
+- Atomic local sessions with latest/resume/recover and corrupt-record isolation
 - Replay of response output items, including encrypted reasoning content
-- Workspace-scoped `list_files`, `read_file`, `grep_files`, `write_file`, and
-  `edit_file` tools
+- All 13 fx filesystem tools: list, glob, grep, read, write, edit, delete,
+  rename, copy, create-folder, metadata, lexical semantic search, and Windows open
+- Installed-skill discovery plus safe, bounded skill resource reads
+- Strict fx-compatible skill metadata and no-auth `skills` list/show/create/remove/local-install commands
+- Content-addressed session image sidecars with MIME, digest, size, and symlink verification
+- fx-compatible persistent memory plus session-scoped large tool-result previews, bounded paging, and literal search
+- Interactive FX-shaped multiple-choice clarification with a noninteractive sentinel
+- Direct bounded public `web_fetch` with redirect revalidation, HTML text conversion, caching, and credential redaction
+- MCP stdio and Streamable HTTP tools, metadata search/selection, resources, prompts, completion, strict validation, and health policy
 - Captured `run_command` execution with a timeout and bounded output
-- Confirmation before writes, edits, and commands; `--yes` for unattended runs
+- FX-shaped `terminal` actions for captured exec, bounded background-process
+  lifecycles, plain-output screen snapshots, and process-lifetime monitors
+- Optional OpenAI-hosted Responses web search (`--web-search`)
+- Bounded local `install_skill` with immediate catalog refresh
+- Bounded asynchronous subagents with six fx-shaped command branches,
+  durable conversations, explicit restart resume, and authority clamping
+- ACP v1 stdio mode with durable sessions, incremental Responses output,
+  cancellation, model/mode configuration, and bounded JSON-RPC framing
+- Read-only `status`, `permissions`, `doctor`, and paginated `sessions` commands
+- `ask`, conservative `auto`, and unrestricted `yolo` permission modes (`--yes` remains an alias)
 - A bounded agent loop and exact `function_call`/`function_call_output` pairing
 
 ## Build
@@ -43,6 +62,14 @@ Run one request:
 java -jar target/java-agent.jar ask "Explain this repository"
 ```
 
+Manage local skills without an API key:
+
+```sh
+java -jar target/java-agent.jar skills list
+java -jar target/java-agent.jar skills create review
+java -jar target/java-agent.jar skills install C:\path\to\skill-pack --skill=review
+```
+
 Permit file mutations and shell commands without interactive confirmation:
 
 ```sh
@@ -62,24 +89,35 @@ The base URL may be the API base or the complete `/responses` endpoint. Run
 
 ## Data handling
 
-The client sends `store=false` and manages conversation state locally. It asks
+The client sends `store=false` and manages conversation state locally in atomic, workspace-scoped snapshots. Use `--resume last` (or a session ID), `--no-save`, and `JAVA_AGENT_HOME` to
+control persistence. It asks
 the API to return `reasoning.encrypted_content`, then preserves all response
 output items when continuing a conversation or returning tool results. This
 supports stateless operation and avoids relying on server-stored response IDs.
 
 ## Safety boundary
 
-File paths are normalized and checked against the real workspace root. Existing
-symlinks cannot be used to escape that root. Reads are limited to 1 MB, tool
-output is bounded, and shell commands time out. OpenAI API keys are removed from
-spawned command environments. Commands still have the authority of the Java
-process, so keep confirmation enabled and use your corporate sandbox where
-appropriate.
+Paths are normalized and canonicalized. Workspace reads run directly; external
+paths and symlink escapes require per-call approval, as do mutations, opening
+files, and commands. Read views are capped at 50 KiB, prepared mutations at 4
+MiB, and command output at 200 KiB. OpenAI API keys are removed from spawned
+command environments. Commands still have the authority of the Java process, so
+keep confirmation enabled and use your corporate sandbox where appropriate.
 
-## Deliberately out of scope
+## Parity roadmap
 
-The reference `fx` project also includes a full-screen terminal UI, persisted
-sessions, ACP, MCP, skills, subagents, web tools, OAuth login, automatic permission
-review, streaming, and extensive recovery logic. This basis concentrates on a
-readable Java Responses agent loop suitable for extension inside a JVM-only
-environment.
+Gateway support remains intentionally excluded. Responses compaction,
+crash-recoverable terminal sessions and full PTY/ANSI screen behavior, richer
+permission rules, full ACP permission/elicitation/MCP/tool-presentation parity,
+MCP OAuth/subscriptions/legacy SSE, remote skill sources
+and full-screen skill management, full subagent notification/identity/replay
+parity, media tools, and the full-screen UI remain fx parity work. The implemented terminal boundary is documented in
+[`docs/terminal-parity.md`](docs/terminal-parity.md). The session/streaming
+subset and its explicit limits are in
+[`docs/session-streaming-parity.md`](docs/session-streaming-parity.md), and skills
+in
+[`docs/skills-parity.md`](docs/skills-parity.md). Subagent coverage is in
+[`docs/subagent-parity.md`](docs/subagent-parity.md). ACP coverage is in
+[`docs/acp-parity.md`](docs/acp-parity.md). Filesystem
+behavior targets Windows and is covered by the Windows
+CI workflow.

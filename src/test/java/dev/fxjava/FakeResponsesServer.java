@@ -48,7 +48,9 @@ final class FakeResponsesServer implements AutoCloseable {
         String request = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
         int number = requests.incrementAndGet();
         if (!request.contains("\"store\":false")
-                || !request.contains("reasoning.encrypted_content")) {
+                || !request.contains("\"stream\":true")
+                || !request.contains("reasoning.encrypted_content")
+                || !exchange.getRequestHeaders().getFirst("Accept").contains("text/event-stream")) {
             byte[] error = "missing stateless Responses fields".getBytes(StandardCharsets.UTF_8);
             exchange.sendResponseHeaders(400, error.length);
             exchange.getResponseBody().write(error);
@@ -63,11 +65,20 @@ final class FakeResponsesServer implements AutoCloseable {
             exchange.close();
             return;
         }
-        byte[] body = (number == 1 ? TOOL_RESPONSE : FINAL_RESPONSE).getBytes(StandardCharsets.UTF_8);
-        exchange.getResponseHeaders().add("Content-Type", "application/json");
+        String events = number == 1
+                ? completed(TOOL_RESPONSE)
+                : "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Responses smoke test complete\"}\n\n"
+                    + completed(FINAL_RESPONSE);
+        byte[] body = events.getBytes(StandardCharsets.UTF_8);
+        exchange.getResponseHeaders().add("Content-Type", "text/event-stream");
         exchange.sendResponseHeaders(200, body.length);
         exchange.getResponseBody().write(body);
         exchange.close();
+    }
+
+    private static String completed(String response) {
+        return "data: {\"type\":\"response.completed\",\"response\":"
+                + response.replace("\r", "").replace("\n", "") + "}\n\n";
     }
 
     public static void main(String[] args) throws Exception {
