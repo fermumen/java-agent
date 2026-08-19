@@ -115,6 +115,42 @@ class SubagentManagerParityTest {
         }
     }
 
+    @Test
+    void relationshipMutationsEnforceParentStateAndCycles() throws Exception {
+        CountDownLatch running = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try (SubagentManager manager = new SubagentManager(json, configuration -> prompt -> {
+            running.countDown();
+            release.await(5, TimeUnit.SECONDS);
+            return "done";
+        }, PermissionMode.YOLO)) {
+            SubagentTool tool = new SubagentTool(manager);
+            String active = call(tool, create("active", "persistent", "work"), "active")
+                    .path("child_id").asText();
+            assertTrue(running.await(2, TimeUnit.SECONDS));
+            assertEquals("invalid_state", call(tool, relationship(active, "detach", null), "detach-running")
+                    .path("error_code").asText());
+            release.countDown();
+            call(tool, inspect(active, true, "status"), "wait-active");
+
+            String parent = call(tool, create("parent", "persistent", null), "parent")
+                    .path("child_id").asText();
+            assertEquals("relationship_already_parented",
+                    call(tool, relationship(active, "attach", parent), "already").path("error_code").asText());
+            assertEquals("relationship_changed",
+                    call(tool, relationship(active, "detach", null), "detach").path("status").asText());
+            assertEquals("relationship_missing_parent",
+                    call(tool, relationship(active, "detach", null), "missing").path("error_code").asText());
+            assertEquals("relationship_missing_parent",
+                    call(tool, relationship(active, "reparent", parent), "reparent-missing")
+                            .path("error_code").asText());
+            call(tool, relationship(active, "attach", parent), "attach-parent");
+            call(tool, relationship(parent, "detach", null), "detach-parent");
+            assertEquals("relationship_cycle",
+                    call(tool, relationship(parent, "attach", active), "cycle").path("error_code").asText());
+        }
+    }
+
     private ObjectNode create(String name, String mode, String prompt) {
         ObjectNode root = command("create");
         ObjectNode create = (ObjectNode) root.path("command").path("create");
@@ -136,6 +172,14 @@ class SubagentManagerParityTest {
     private ObjectNode lifecycle(String id, String action) {
         ObjectNode root = command("lifecycle");
         ((ObjectNode) root.path("command").path("lifecycle")).put("id", id).put("action", action);
+        return root;
+    }
+
+    private ObjectNode relationship(String id, String action, String parentId) {
+        ObjectNode root = command("relationship");
+        ObjectNode relationship = (ObjectNode) root.path("command").path("relationship");
+        relationship.put("id", id).put("action", action);
+        if (parentId != null) relationship.put("parent_id", parentId);
         return root;
     }
 

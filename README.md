@@ -37,7 +37,7 @@ standard corporate JVM proxy and trust-store settings continue to apply.
 - Bounded local `install_skill` with immediate catalog refresh
 - Bounded asynchronous subagents with six fx-shaped command branches,
   durable conversations, explicit restart resume, authority clamping, and
-  child-authenticated milestone events
+  child-authenticated milestone events plus durable parent-turn delivery
 - ACP v1 stdio mode with durable sessions, incremental Responses output,
   cancellation, model/mode configuration, and bounded JSON-RPC framing
 - Read-only `status`, `permissions`, `doctor`, `mcp list`, and paginated `sessions` commands
@@ -123,8 +123,8 @@ keep confirmation enabled and use your corporate sandbox where appropriate.
 Gateway support and further ACP parity are intentionally excluded. The existing compact ACP mode remains available for compatibility. Responses compaction,
 crash-recoverable terminal sessions and full PTY/ANSI screen behavior, richer
 permission rules, MCP OAuth/filtered subscriptions, remote skill sources
-and full-screen skill management, full subagent notification/identity/relationship-index
-parity, media tools, and the full-screen UI remain fx parity work. The implemented terminal boundary is documented in
+and full-screen skill management, interval subagent reports and richer identity
+isolation, media tools, and the full-screen UI remain fx parity work. The implemented terminal boundary is documented in
 [`docs/terminal-parity.md`](docs/terminal-parity.md). The session/streaming
 subset and its explicit limits are in
 [`docs/session-streaming-parity.md`](docs/session-streaming-parity.md), and skills

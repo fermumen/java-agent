@@ -13,6 +13,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -75,6 +76,32 @@ class AgentTest {
         JsonNode definition = client.toolDefinitions.get(0).path(0);
         assertEquals("web_search", definition.path("type").asText());
         assertTrue(!definition.has("name") && !definition.has("parameters"));
+    }
+
+    @Test
+    void injectsEphemeralParentContextAndAcknowledgesOnlyAfterProviderSuccess() throws Exception {
+        FakeClient client = new FakeClient(textResponse("Observed"));
+        AtomicInteger acknowledgements = new AtomicInteger();
+        Agent.ParentContext parent = new Agent.ParentContext() {
+            public Agent.PreparedParentContext prepare() {
+                return new Agent.PreparedParentContext("<subagent_deliveries>trusted</subagent_deliveries>",
+                        List.of(new Agent.ParentDeliveryAck("child", "root", 4)));
+            }
+            public void acknowledge(Agent.PreparedParentContext prepared) {
+                acknowledgements.incrementAndGet();
+            }
+        };
+        Agent agent = new Agent(json, client, List.of(), (tool, arguments) -> false,
+                new PrintStream(new ByteArrayOutputStream()), 2, "system", null, parent);
+
+        assertEquals("Observed", agent.prompt("continue"));
+        assertEquals("system", client.requests.get(0).path(0).path("role").asText());
+        assertTrue(client.requests.get(0).path(0).path("content").asText().contains("trusted"));
+        assertEquals("user", client.requests.get(0).path(1).path("role").asText());
+        assertEquals(1, acknowledgements.get());
+        assertEquals(2, agent.snapshotInput().size());
+        assertTrue(agent.snapshotInput().valueStream()
+                .noneMatch(item -> item.path("role").asText().equals("system")));
     }
 
     private ObjectNode toolResponse(String callId, String name, String arguments) {

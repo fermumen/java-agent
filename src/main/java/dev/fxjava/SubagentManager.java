@@ -29,6 +29,8 @@ final class SubagentManager implements AutoCloseable {
     private static final int MAX_MESSAGES = 256;
     private static final int MAX_EVENTS = 256;
     private static final int MAX_OPERATIONS = 256;
+    private static final int MAX_PARENT_DELIVERIES = 32;
+    private static final int MAX_PARENT_CONTEXT_BYTES = 16 * 1024;
     private static final Set<String> SETTLED = Set.of("idle", "interrupted", "completed", "failed", "cancelled", "archived");
     private final ObjectMapper json;
     private final ChildFactory childFactory;
@@ -89,6 +91,7 @@ final class SubagentManager implements AutoCloseable {
             child.failure = saved.path("failure").isTextual() ? saved.path("failure").asText() : null;
             child.generation = Math.max(1, saved.path("generation").asLong(1));
             child.eventSequence = Math.max(0, saved.path("event_sequence").asLong());
+            child.parentDeliverySequence = Math.max(0, saved.path("parent_delivery_sequence").asLong());
             for (JsonNode message : saved.path("messages")) {
                 if (child.messages.size() >= MAX_MESSAGES) break;
                 child.messages.add(new Message(message.path("role").asText(), message.path("content").asText(),
@@ -115,7 +118,8 @@ final class SubagentManager implements AutoCloseable {
         ObjectNode saved = json.createObjectNode().put("schema_version", 1).put("id", child.id)
                 .put("name", child.name).put("mode", child.mode).put("state", child.state)
                 .put("archived_from", child.archivedFrom).put("generation", child.generation)
-                .put("event_sequence", child.eventSequence);
+                .put("event_sequence", child.eventSequence)
+                .put("parent_delivery_sequence", child.parentDeliverySequence);
         if (child.parentId == null) saved.putNull("parent_id"); else saved.put("parent_id", child.parentId);
         if (child.failure == null) saved.putNull("failure"); else saved.put("failure", child.failure);
         saved.set("configuration", configuration(child));
@@ -147,6 +151,101 @@ final class SubagentManager implements AutoCloseable {
 
     private static String reconcile(String state) {
         return Set.of("queued", "running", "awaiting_approval").contains(state) ? "interrupted" : state;
+    }
+
+    synchronized Agent.PreparedParentContext prepareParentContext(String parentId) throws IOException {
+        List<Child> ordered = new ArrayList<>(children.values());
+        ordered.sort(java.util.Comparator.comparing(child -> child.id));
+        ArrayNode deliveries = json.createArrayNode();
+        Map<String, Long> through = new LinkedHashMap<>();
+        outer:
+        for (Child child : ordered) {
+            synchronized (child) {
+                if (!parentId.equals(child.parentId)) continue;
+                for (JsonNode event : child.events) {
+                    long sequence = event.path("sequence").asLong();
+                    if (sequence <= child.parentDeliverySequence || !isParentDelivery(event, parentId)) continue;
+                    ObjectNode delivery = renderParentDelivery(child, event);
+                    deliveries.add(delivery);
+                    String rendered = renderParentEnvelope(deliveries);
+                    if (rendered.getBytes(StandardCharsets.UTF_8).length > MAX_PARENT_CONTEXT_BYTES) {
+                        deliveries.remove(deliveries.size() - 1);
+                        break outer;
+                    }
+                    through.put(child.id, sequence);
+                    if (deliveries.size() >= MAX_PARENT_DELIVERIES) break outer;
+                }
+            }
+        }
+        if (deliveries.isEmpty()) return null;
+        List<Agent.ParentDeliveryAck> acknowledgements = new ArrayList<>();
+        through.forEach((childId, sequence) ->
+                acknowledgements.add(new Agent.ParentDeliveryAck(childId, parentId, sequence)));
+        return new Agent.PreparedParentContext(renderParentEnvelope(deliveries), acknowledgements);
+    }
+
+    synchronized void acknowledgeParentContext(Agent.PreparedParentContext prepared) throws IOException {
+        for (Agent.ParentDeliveryAck acknowledgement : prepared.acknowledgements()) {
+            Child child = children.get(acknowledgement.childId());
+            if (child == null) continue;
+            synchronized (child) {
+                if (!acknowledgement.targetParentId().equals(child.parentId)) continue;
+                if (acknowledgement.throughSequence() > child.parentDeliverySequence) {
+                    child.parentDeliverySequence = Math.min(
+                            acknowledgement.throughSequence(), child.eventSequence);
+                    try {
+                        persist(child);
+                    } catch (IOException failure) {
+                        throw failure;
+                    } catch (Exception failure) {
+                        throw new IOException("could not persist parent delivery acknowledgement", failure);
+                    }
+                }
+            }
+        }
+    }
+
+    Agent.ParentContext parentContext(String parentId) {
+        return new Agent.ParentContext() {
+            public Agent.PreparedParentContext prepare() throws IOException {
+                return prepareParentContext(parentId);
+            }
+
+            public void acknowledge(Agent.PreparedParentContext prepared) throws IOException {
+                acknowledgeParentContext(prepared);
+            }
+        };
+    }
+
+    private boolean isParentDelivery(JsonNode event, String parentId) {
+        if (!event.path("target_parent_id").asText("").equals(parentId)) return false;
+        return event.path("kind").asText().equals("milestone_emitted")
+                || event.path("kind").asText().equals("terminal_notification");
+    }
+
+    private ObjectNode renderParentDelivery(Child child, JsonNode event) {
+        ObjectNode delivery = json.createObjectNode().put("sequence", event.path("sequence").asLong())
+                .put("id", child.id + ":" + event.path("sequence").asLong())
+                .put("source_id", child.id).put("target_id", event.path("target_parent_id").asText())
+                .put("timestamp_ms", event.path("created_at_ms").asLong());
+        if (event.path("kind").asText().equals("milestone_emitted")) {
+            delivery.put("kind", "milestone").put("name", event.path("name").asText());
+        } else {
+            delivery.put("kind", "terminal").put("terminal", event.path("terminal").asText());
+            if (event.path("failure_reason").isTextual()) {
+                delivery.put("failure_reason", event.path("failure_reason").asText());
+            }
+        }
+        return delivery;
+    }
+
+    private String renderParentEnvelope(ArrayNode deliveries) throws IOException {
+        StringBuilder content = new StringBuilder(
+                "<subagent_deliveries trusted_runtime_context=\"true\">\n");
+        for (JsonNode delivery : deliveries) {
+            content.append("- ").append(json.writeValueAsString(delivery)).append('\n');
+        }
+        return content.append("</subagent_deliveries>\n").toString();
     }
 
     String execute(SubagentCommand command, String invocationId) throws Exception {
@@ -375,13 +474,37 @@ final class SubagentManager implements AutoCloseable {
     private String relationship(String operationId, ObjectNode value) throws Exception {
         Child child = child(value.path("id").asText());
         synchronized (child) {
-            switch (value.path("action").asText()) {
-                case "detach" -> child.parentId = null;
-                case "attach" -> child.parentId = "root";
+            if (Set.of("running", "awaiting_approval").contains(child.state)) {
+                throw new SubagentFailure(child.id, "invalid_state", false);
+            }
+            String action = value.path("action").asText();
+            switch (action) {
+                case "detach" -> {
+                    if (child.parentId == null) {
+                        throw new SubagentFailure(child.id, "relationship_missing_parent", false);
+                    }
+                    child.parentId = null;
+                }
+                case "attach" -> {
+                    if (child.parentId != null) {
+                        throw new SubagentFailure(child.id, "relationship_already_parented", false);
+                    }
+                    String parent = value.path("parent_id").asText("root");
+                    if (!parent.equals("root")) child(parent);
+                    if (createsCycle(child.id, parent)) {
+                        throw new SubagentFailure(child.id, "relationship_cycle", false);
+                    }
+                    child.parentId = parent;
+                }
                 case "reparent" -> {
+                    if (child.parentId == null) {
+                        throw new SubagentFailure(child.id, "relationship_missing_parent", false);
+                    }
                     String parent = value.path("parent_id").asText();
                     child(parent);
-                    if (createsCycle(child.id, parent)) throw new SubagentFailure(child.id, "invalid_relationship", false);
+                    if (createsCycle(child.id, parent)) {
+                        throw new SubagentFailure(child.id, "relationship_cycle", false);
+                    }
                     child.parentId = parent;
                 }
                 default -> throw new SubagentFailure(child.id, "invalid_relationship", false);
@@ -394,6 +517,7 @@ final class SubagentManager implements AutoCloseable {
     private String lifecycle(String operationId, ObjectNode value) throws Exception {
         Child child = child(value.path("id").asText());
         String action = value.path("action").asText();
+        boolean cancelled = false;
         synchronized (child) {
             switch (action) {
                 case "cancel" -> {
@@ -403,6 +527,7 @@ final class SubagentManager implements AutoCloseable {
                     if (child.future != null) child.future.cancel(true);
                     child.state = child.mode.equals("persistent") ? "idle" : "cancelled";
                     child.currentPrompt = null;
+                    cancelled = true;
                 }
                 case "resume" -> {
                     if (!child.state.equals("interrupted")) {
@@ -425,6 +550,7 @@ final class SubagentManager implements AutoCloseable {
                 default -> throw new SubagentFailure(child.id, "invalid_lifecycle_transition", false);
             }
             changed(child, action);
+            if (cancelled) notifyTerminal(child, "cancelled");
         }
         return receipt(operationId, child, "lifecycle_changed");
     }
@@ -466,6 +592,7 @@ final class SubagentManager implements AutoCloseable {
                 child.failure = null;
                 child.state = child.mode.equals("one_off") ? "completed" : "idle";
                 changed(child, child.state);
+                notifyTerminal(child, "completed");
                 if (child.mode.equals("persistent") && !child.queue.isEmpty()) submitNext(child);
             }
         } catch (InterruptedException interrupted) {
@@ -482,6 +609,7 @@ final class SubagentManager implements AutoCloseable {
                 child.currentPrompt = null;
                 child.state = "failed";
                 changed(child, "failed");
+                notifyTerminal(child, "failed");
             }
         }
     }
@@ -603,6 +731,24 @@ final class SubagentManager implements AutoCloseable {
         child.notifyAll();
     }
 
+    private void notifyTerminal(Child child, String terminal) {
+        if (!terminalEnabled(child, terminal) || child.parentId == null) return;
+        child.generation++;
+        ObjectNode event = child.events.addObject().put("sequence", ++child.eventSequence)
+                .put("kind", "terminal_notification").put("terminal", terminal)
+                .put("source_child_id", child.id).put("target_parent_id", child.parentId)
+                .put("created_at_ms", System.currentTimeMillis());
+        if (child.failure != null) event.put("failure_reason", child.failure);
+        if (child.events.size() > MAX_EVENTS) child.events.remove(0);
+        persistQuietly(child);
+        child.notifyAll();
+    }
+
+    private boolean terminalEnabled(Child child, String terminal) {
+        JsonNode configured = child.notifications.path("terminal").get(terminal);
+        return configured == null || configured.asBoolean();
+    }
+
     private static String operationId(String invocation) {
         if (invocation != null && !invocation.isEmpty() && invocation.length() <= 128
                 && invocation.chars().noneMatch(Character::isWhitespace)) return invocation;
@@ -664,6 +810,7 @@ final class SubagentManager implements AutoCloseable {
         String currentPrompt;
         long generation = 1;
         long eventSequence;
+        long parentDeliverySequence;
         Future<?> future;
         ObjectNode notifications = json.createObjectNode();
 

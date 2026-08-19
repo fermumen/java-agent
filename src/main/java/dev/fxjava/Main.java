@@ -99,15 +99,19 @@ public final class Main {
         agentTools.add(new ReadToolResultTool(resultStore));
         agentTools.addAll(mcp.tools());
         AtomicReference<List<Tool>> childTools = new AtomicReference<>();
+        AtomicReference<SubagentManager> subagentRuntime = new AtomicReference<>();
         try (SubagentManager subagents = new SubagentManager(json, child ->
                 new SubagentAgentRunner(json, config.apiKey(), config.baseUrl(), config.model(),
-                        config.workspace(), config.maxSteps(), sessionRoot, childTools, approval, error, child),
+                        config.workspace(), config.maxSteps(), sessionRoot, childTools, approval, error, child,
+                        subagentRuntime.get().parentContext(child.id())),
                 permissionMode, options.noSave ? null : sessionRoot)) {
+        subagentRuntime.set(subagents);
         agentTools.add(new SubagentTool(subagents));
         childTools.set(List.copyOf(agentTools));
         subagents.restore();
         Agent agent = new Agent(json, new OpenAiResponsesClient(json, config),
-                agentTools, approval, error, config.maxSteps(), systemPrompt, resultStore);
+                agentTools, approval, error, config.maxSteps(), systemPrompt, resultStore,
+                subagents.parentContext("root"));
         SessionRuntime session = SessionRuntime.start(agent, store, config.workspace(), config.model(),
                 systemPrompt, options.resume);
 

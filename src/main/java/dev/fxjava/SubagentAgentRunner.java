@@ -21,6 +21,7 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
     private final AtomicReference<List<Tool>> tools;
     private final ApprovalPolicy parentApproval;
     private final PrintStream progress;
+    private final Agent.ParentContext parentContext;
     private SubagentManager.ChildConfiguration configuration;
     private Agent agent;
 
@@ -28,6 +29,15 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
                         Path sessionRoot, AtomicReference<List<Tool>> tools,
                         ApprovalPolicy parentApproval, PrintStream progress,
                         SubagentManager.ChildConfiguration configuration) throws Exception {
+        this(json, apiKey, baseUrl, defaultModel, workspace, maxSteps, sessionRoot, tools,
+                parentApproval, progress, configuration, null);
+    }
+
+    SubagentAgentRunner(ObjectMapper json, String apiKey, String baseUrl, String defaultModel, Path workspace, int maxSteps,
+                        Path sessionRoot, AtomicReference<List<Tool>> tools,
+                        ApprovalPolicy parentApproval, PrintStream progress,
+                        SubagentManager.ChildConfiguration configuration,
+                        Agent.ParentContext parentContext) throws Exception {
         this.json = json;
         this.apiKey = apiKey;
         this.baseUrl = baseUrl;
@@ -38,6 +48,7 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
         this.tools = tools;
         this.parentApproval = parentApproval;
         this.progress = progress;
+        this.parentContext = parentContext;
         this.configuration = configuration;
         this.agent = build(configuration);
     }
@@ -85,7 +96,8 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
             else childTools.add(tool);
         }
         Agent built = new Agent(json, new OpenAiResponsesClient(json, config), childTools,
-                approval(child.permissionMode()), progress, maxSteps, instructionsFor(child, null), results);
+                approval(child.permissionMode()), progress, maxSteps, instructionsFor(child, null), results,
+                parentContext);
         built.setToolResultSession(child.id());
         return built;
     }

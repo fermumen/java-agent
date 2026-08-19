@@ -29,6 +29,7 @@ public final class Agent {
     private final PrintStream progress;
     private final int maxSteps;
     private final ToolResultStore resultStore;
+    private final ParentContext parentContext;
     private String instructions;
 
     public Agent(ObjectMapper json, ResponsesClient client, List<Tool> tools,
@@ -40,6 +41,12 @@ public final class Agent {
     public Agent(ObjectMapper json, ResponsesClient client, List<Tool> tools,
                  ApprovalPolicy approvalPolicy, PrintStream progress, int maxSteps,
                  String systemPrompt, ToolResultStore resultStore) {
+        this(json, client, tools, approvalPolicy, progress, maxSteps, systemPrompt, resultStore, null);
+    }
+
+    Agent(ObjectMapper json, ResponsesClient client, List<Tool> tools,
+          ApprovalPolicy approvalPolicy, PrintStream progress, int maxSteps,
+          String systemPrompt, ToolResultStore resultStore, ParentContext parentContext) {
         this.json = json;
         this.client = client;
         this.tools = tools.stream().collect(Collectors.toUnmodifiableMap(Tool::name, Function.identity()));
@@ -50,6 +57,7 @@ public final class Agent {
         this.maxSteps = maxSteps;
         this.instructions = systemPrompt;
         this.resultStore = resultStore;
+        this.parentContext = parentContext;
     }
 
     public String prompt(String input) throws IOException, InterruptedException {
@@ -61,7 +69,15 @@ public final class Agent {
         lastToolCalls.clear();
         addUserMessage(input);
         for (int step = 0; step < maxSteps; step++) {
-            ObjectNode response = client.complete(inputHistory.deepCopy(), buildToolDefinitions(toolCatalog), instructions, textDelta);
+            ArrayNode requestInput = inputHistory.deepCopy();
+            PreparedParentContext prepared = parentContext == null ? null : parentContext.prepare();
+            if (prepared != null && !prepared.content().isBlank()) {
+                ObjectNode context = json.createObjectNode().put("role", "system")
+                        .put("content", prepared.content());
+                requestInput.insert(0, context);
+            }
+            ObjectNode response = client.complete(requestInput, buildToolDefinitions(toolCatalog), instructions, textDelta);
+            if (prepared != null) parentContext.acknowledge(prepared);
             ArrayNode output = (ArrayNode) response.path("output");
             List<JsonNode> functionCalls = new ArrayList<>();
 
@@ -239,6 +255,20 @@ public final class Agent {
     }
 
     public record ToolCallRecord(String name, String status) { }
+
+    interface ParentContext {
+        PreparedParentContext prepare() throws IOException;
+        void acknowledge(PreparedParentContext prepared) throws IOException;
+    }
+
+    record PreparedParentContext(String content, List<ParentDeliveryAck> acknowledgements) {
+        PreparedParentContext {
+            content = content == null ? "" : content;
+            acknowledgements = List.copyOf(acknowledgements);
+        }
+    }
+
+    record ParentDeliveryAck(String childId, String targetParentId, long throughSequence) { }
 
     private static String safeMessage(Exception error) {
         String message = error.getMessage();
