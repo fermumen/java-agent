@@ -36,7 +36,8 @@ standard corporate JVM proxy and trust-store settings continue to apply.
 - Optional OpenAI-hosted Responses web search (`--web-search`)
 - Bounded local `install_skill` with immediate catalog refresh
 - Bounded asynchronous subagents with six fx-shaped command branches,
-  durable conversations, explicit restart resume, and authority clamping
+  durable conversations, explicit restart resume, authority clamping, and
+  child-authenticated milestone events
 - ACP v1 stdio mode with durable sessions, incremental Responses output,
   cancellation, model/mode configuration, and bounded JSON-RPC framing
 - Read-only `status`, `permissions`, `doctor`, `mcp list`, and paginated `sessions` commands

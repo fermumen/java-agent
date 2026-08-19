@@ -80,7 +80,9 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
         results.setSession(child.id());
         List<Tool> childTools = new java.util.ArrayList<>();
         for (Tool tool : tools.get()) {
-            childTools.add(tool.name().equals("read_tool_result") ? new ReadToolResultTool(results) : tool);
+            if (tool.name().equals("read_tool_result")) childTools.add(new ReadToolResultTool(results));
+            else if (tool instanceof SubagentTool subagent) childTools.add(subagent.scoped(child.id()));
+            else childTools.add(tool);
         }
         Agent built = new Agent(json, new OpenAiResponsesClient(json, config), childTools,
                 approval(child.permissionMode()), progress, maxSteps, instructionsFor(child, null), results);

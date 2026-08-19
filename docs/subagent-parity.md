@@ -14,9 +14,11 @@ requested projections, and pagination cursor.
 - condition-based inspection waits, generation-bound message pagination,
   stale-cursor rejection, events, configuration, relationship, and settled
   tool-activity projections;
-- queued messages, milestones, configuration changes, attach/detach/reparent
-  operations with cycle rejection, and cancel/resume/close/reopen lifecycle
-  transitions;
+- queued messages, configuration changes, attach/detach/reparent operations
+  with cycle rejection, and cancel/resume/close/reopen lifecycle transitions;
+- explicit child-scoped tool capabilities for milestone authorship, active-work
+  and declared-name enforcement, per-work name deduplication, actor-scoped
+  operation replay, durable notification policy, and nonblocking inspect waits;
 - atomic bounded child snapshots containing messages, queued and in-flight
   work, events, tool activity, configuration, relationship, and conversation;
 - restart reconciliation of active work to `interrupted`, with execution held
@@ -30,12 +32,11 @@ requested projections, and pagination cursor.
 The primary Java owners are `SubagentCommandParityTest`,
 `SubagentManagerParityTest`, `SubagentPaginationParityTest`,
 `SubagentPersistenceParityTest`, `SubagentOperationReplayTest`,
-`SubagentToolActivityParityTest`, and
+`SubagentToolActivityParityTest`, `SubagentMilestoneParityTest`, and
 `MainSubagentIntegrationTest`.
 
 ## Remaining subagent work
 
 Notification policy is validated and persisted but is not yet projected into a
-parent-session asynchronous notification stream. Milestone authorship is not
-yet restricted to a child-scoped identity, relationship state does not have
-fx's separate durable index. These limits are not counted as parity yet.
+parent-session asynchronous notification stream. Relationship state does not
+have fx's separate durable index. These limits are not counted as parity yet.

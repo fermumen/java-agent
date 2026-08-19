@@ -26,7 +26,7 @@ class MainSubagentIntegrationTest {
     Path workspace;
 
     @Test
-    void executableCreatesChildThenInspectWaitReturnsItsSettledAnswer() throws Exception {
+    void executableChildEmitsMilestoneThenInspectWaitReturnsItsSettledAnswer() throws Exception {
         AtomicInteger parentRequests = new AtomicInteger();
         AtomicInteger childRequests = new AtomicInteger();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -46,7 +46,7 @@ class MainSubagentIntegrationTest {
             assertEquals(2, result.path("tool_calls").size());
             assertEquals("subagent", result.path("tool_calls").path(0).path("name").asText());
             assertEquals(3, parentRequests.get());
-            assertEquals(1, childRequests.get());
+            assertEquals(2, childRequests.get());
         } finally {
             server.stop(0);
         }
@@ -58,13 +58,20 @@ class MainSubagentIntegrationTest {
             boolean child = request.path("instructions").asText().contains("Subagent identity:");
             String response;
             if (child) {
-                childRequests.incrementAndGet();
-                response = textResponse("child evidence");
+                int number = childRequests.incrementAndGet();
+                if (number == 1) {
+                    response = functionResponse("child-milestone", "subagent",
+                            "{\"command\":{\"message\":{\"milestone\":{\"name\":\"halfway\"}}}}");
+                } else {
+                    assertTrue(latestToolOutput(request).contains("milestone_emitted"));
+                    response = textResponse("child evidence");
+                }
             } else {
                 int number = parentRequests.incrementAndGet();
                 if (number == 1) {
                     response = functionResponse("parent-create", "subagent",
-                            "{\"command\":{\"create\":{\"name\":\"worker\",\"mode\":\"one_off\",\"prompt\":\"investigate\"}}}");
+                            "{\"command\":{\"create\":{\"name\":\"worker\",\"mode\":\"one_off\","
+                                    + "\"prompt\":\"investigate\",\"notifications\":{\"milestones\":[\"halfway\"]}}}}");
                 } else if (number == 2) {
                     String output = latestToolOutput(request);
                     String childId = json.readTree(output).path("child_id").asText();

@@ -12,6 +12,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -36,6 +37,7 @@ final class SubagentManager implements AutoCloseable {
     private final SubagentStateStore stateStore;
     private final Map<String, Child> children = new LinkedHashMap<>();
     private final LinkedHashMap<String, OperationReplay> operations = new LinkedHashMap<>();
+    private final Object operationMutex = new Object();
 
     SubagentManager(ObjectMapper json, ChildFactory childFactory, PermissionMode parentPermission) {
         this(json, childFactory, parentPermission, null);
@@ -78,6 +80,9 @@ final class SubagentManager implements AutoCloseable {
                     config.path("effort").isTextual() ? config.path("effort").asText() : null, permission);
             ChildRunner runner = childFactory.create(configuration);
             Child child = new Child(id, name, mode, configuration, runner);
+            if (config.path("notifications").isObject()) {
+                child.notifications = ((ObjectNode) config.path("notifications")).deepCopy();
+            }
             child.state = reconcile(saved.path("state").asText("interrupted"));
             child.archivedFrom = saved.path("archived_from").asText("idle");
             child.parentId = saved.path("parent_id").isTextual() ? saved.path("parent_id").asText() : null;
@@ -144,10 +149,25 @@ final class SubagentManager implements AutoCloseable {
         return Set.of("queued", "running", "awaiting_approval").contains(state) ? "interrupted" : state;
     }
 
-    synchronized String execute(SubagentCommand command, String invocationId) throws Exception {
+    String execute(SubagentCommand command, String invocationId) throws Exception {
+        return execute(command, invocationId, null);
+    }
+
+    String execute(SubagentCommand command, String invocationId, String actorId) throws Exception {
+        if (command.branch().equals("inspect") || authenticatedMilestone(command, actorId)) {
+            return executeOperation(command, invocationId, actorId);
+        }
+        synchronized (this) {
+            return executeOperation(command, invocationId, actorId);
+        }
+    }
+
+    private String executeOperation(SubagentCommand command, String invocationId, String actorId) throws Exception {
         String operationId = operationId(invocationId);
+        String replayKey = replayKey(operationId, actorId);
         String fingerprint = requestFingerprint(command);
-        OperationReplay replay = operations.get(operationId);
+        OperationReplay replay;
+        synchronized (operationMutex) { replay = operations.get(replayKey); }
         if (replay != null) {
             if (replay.fingerprint().equals(fingerprint)) return replay.receipt();
             return failure(operationId, null, "operation_conflict", false);
@@ -157,7 +177,7 @@ final class SubagentManager implements AutoCloseable {
             result = switch (command.branch()) {
                 case "create" -> create(operationId, command.value());
                 case "inspect" -> inspect(operationId, command.value());
-                case "message" -> message(operationId, command.value());
+                case "message" -> message(operationId, command.value(), actorId);
                 case "relationship" -> relationship(operationId, command.value());
                 case "configure" -> configure(operationId, command.value());
                 case "lifecycle" -> lifecycle(operationId, command.value());
@@ -166,21 +186,23 @@ final class SubagentManager implements AutoCloseable {
         } catch (SubagentFailure failure) {
             result = failure(operationId, failure.childId, failure.code, failure.retryable);
         }
-        remember(operationId, fingerprint, result);
+        remember(replayKey, fingerprint, result);
         return result;
     }
 
     private void remember(String operationId, String fingerprint, String receipt) throws IOException {
-        operations.put(operationId, new OperationReplay(fingerprint, receipt));
-        while (operations.size() > MAX_OPERATIONS) {
-            operations.remove(operations.keySet().iterator().next());
+        synchronized (operationMutex) {
+            operations.put(operationId, new OperationReplay(fingerprint, receipt));
+            while (operations.size() > MAX_OPERATIONS) {
+                operations.remove(operations.keySet().iterator().next());
+            }
+            List<SubagentStateStore.Operation> saved = new ArrayList<>();
+            for (var entry : operations.entrySet()) {
+                saved.add(new SubagentStateStore.Operation(entry.getKey(), entry.getValue().fingerprint(),
+                        entry.getValue().receipt()));
+            }
+            stateStore.saveOperations(saved);
         }
-        List<SubagentStateStore.Operation> saved = new ArrayList<>();
-        for (var entry : operations.entrySet()) {
-            saved.add(new SubagentStateStore.Operation(entry.getKey(), entry.getValue().fingerprint(),
-                    entry.getValue().receipt()));
-        }
-        stateStore.saveOperations(saved);
     }
 
     private String requestFingerprint(SubagentCommand command) throws IOException {
@@ -227,6 +249,9 @@ final class SubagentManager implements AutoCloseable {
             ChildRunner runner = childFactory.create(configuration);
             child = new Child(id, value.path("name").asText(), value.path("mode").asText(),
                     configuration, runner);
+            if (value.path("notifications").isObject()) {
+                child.notifications = ((ObjectNode) value.path("notifications")).deepCopy();
+            }
             children.put(id, child);
         }
         String prompt = value.path("prompt").isTextual() ? value.path("prompt").asText() : null;
@@ -275,11 +300,9 @@ final class SubagentManager implements AutoCloseable {
         return outcome(true, operationId, child.id, status, null, timedOut, requested, nextCursor);
     }
 
-    private String message(String operationId, ObjectNode value) throws Exception {
+    private String message(String operationId, ObjectNode value, String actorId) throws Exception {
         if (value.has("milestone")) {
-            ObjectNode requested = json.createObjectNode().put("outcome", "milestone_emitted")
-                    .put("name", value.path("milestone").path("name").asText());
-            return outcome(true, operationId, null, "milestone_emitted", null, false, requested, null);
+            return milestone(operationId, value.path("milestone").path("name").asText(), actorId);
         }
         JsonNode send = value.path("send");
         Child child = child(send.path("id").asText());
@@ -289,6 +312,39 @@ final class SubagentManager implements AutoCloseable {
         }
         enqueue(child, send.path("content").asText());
         return receipt(operationId, child, "message_queued");
+    }
+
+    private String milestone(String operationId, String name, String actorId) throws Exception {
+        if (actorId == null) throw new SubagentFailure(null, "invalid_milestone_caller", false);
+        Child child = child(actorId);
+        synchronized (child) {
+            if (!child.state.equals("running") || child.currentPrompt == null) {
+                throw new SubagentFailure(child.id, "no_active_work", false);
+            }
+            boolean declared = false;
+            for (JsonNode candidate : child.notifications.path("milestones")) {
+                if (candidate.asText().equals(name)) { declared = true; break; }
+            }
+            if (!declared) throw new SubagentFailure(child.id, "undeclared_milestone", false);
+            Long sequence = child.emittedMilestones.get(name);
+            if (sequence == null) {
+                child.generation++;
+                sequence = ++child.eventSequence;
+                ObjectNode event = child.events.addObject().put("sequence", sequence)
+                        .put("kind", "milestone_emitted").put("name", name)
+                        .put("source_child_id", child.id).put("created_at_ms", System.currentTimeMillis());
+                if (child.parentId == null) event.putNull("target_parent_id");
+                else event.put("target_parent_id", child.parentId);
+                if (child.events.size() > MAX_EVENTS) child.events.remove(0);
+                child.emittedMilestones.put(name, sequence);
+                persistQuietly(child);
+                child.notifyAll();
+            }
+            ObjectNode requested = json.createObjectNode().put("outcome", "milestone_emitted")
+                    .put("name", name).put("source_child_id", child.id)
+                    .put("generation", child.generation).put("event_sequence", sequence);
+            return outcome(true, operationId, child.id, "milestone_emitted", null, false, requested, null);
+        }
     }
 
     private String configure(String operationId, ObjectNode value) throws Exception {
@@ -308,6 +364,9 @@ final class SubagentManager implements AutoCloseable {
             }
             child.configuration = replacement;
             child.name = name;
+            if (value.path("notifications").isObject()) {
+                child.notifications = ((ObjectNode) value.path("notifications")).deepCopy();
+            }
             changed(child, "configured");
         }
         return receipt(operationId, child, "configured");
@@ -383,6 +442,7 @@ final class SubagentManager implements AutoCloseable {
         if (child.queue.isEmpty()) return;
         String prompt = child.queue.remove();
         child.currentPrompt = prompt;
+        child.emittedMilestones.clear();
         child.state = "queued";
         changed(child, "queued");
         child.future = executor.submit(() -> run(child, prompt));
@@ -464,6 +524,7 @@ final class SubagentManager implements AutoCloseable {
                 .put("permission_mode", child.configuration.permissionMode().name().toLowerCase());
         if (child.configuration.model() == null) result.putNull("model"); else result.put("model", child.configuration.model());
         if (child.configuration.effort() == null) result.putNull("effort"); else result.put("effort", child.configuration.effort());
+        result.set("notifications", child.notifications.deepCopy());
         return result;
     }
 
@@ -548,6 +609,14 @@ final class SubagentManager implements AutoCloseable {
         return "call_" + digest(invocation == null ? "" : invocation);
     }
 
+    private boolean authenticatedMilestone(SubagentCommand command, String actorId) {
+        return actorId != null && command.branch().equals("message") && command.value().has("milestone");
+    }
+
+    private String replayKey(String operationId, String actorId) {
+        return actorId == null ? operationId : "actor-" + digest(actorId + "\0" + operationId);
+    }
+
     private static String digest(String value) {
         try {
             return java.util.HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
@@ -585,6 +654,7 @@ final class SubagentManager implements AutoCloseable {
         final List<Message> messages = new ArrayList<>();
         final ArrayNode events = json.createArrayNode();
         final ArrayNode toolActivity = json.createArrayNode();
+        final Map<String, Long> emittedMilestones = new HashMap<>();
         String name;
         ChildConfiguration configuration;
         String state = "idle";
@@ -595,6 +665,7 @@ final class SubagentManager implements AutoCloseable {
         long generation = 1;
         long eventSequence;
         Future<?> future;
+        ObjectNode notifications = json.createObjectNode();
 
         Child(String id, String name, String mode, ChildConfiguration configuration, ChildRunner runner) {
             this.id = id;

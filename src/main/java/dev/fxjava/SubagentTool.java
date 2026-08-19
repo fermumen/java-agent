@@ -12,11 +12,22 @@ import java.util.UUID;
 final class SubagentTool implements Tool {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final SubagentManager manager;
+    private final String actorId;
     private final ObjectNode parameters;
 
     SubagentTool(SubagentManager manager) {
+        this(manager, null);
+    }
+
+    private SubagentTool(SubagentManager manager, String actorId) {
         this.manager = manager;
+        this.actorId = actorId;
         parameters = schema();
+    }
+
+    SubagentTool scoped(String childId) {
+        SubagentCommand.validateId(childId);
+        return new SubagentTool(manager, childId);
     }
 
     @Override public String name() { return "subagent"; }
@@ -41,7 +52,7 @@ final class SubagentTool implements Tool {
     @Override
     public String execute(JsonNode arguments, String invocationId) throws Exception {
         try {
-            return manager.execute(SubagentCommand.parse(arguments), invocationId);
+            return manager.execute(SubagentCommand.parse(arguments), invocationId, actorId);
         } catch (IllegalArgumentException rejected) {
             String code = rejected.getMessage();
             int marker = code == null ? -1 : code.lastIndexOf(": ");
