@@ -63,7 +63,8 @@ class AgentSessionStateTest {
             if (step.getAndIncrement() == 0) {
                 response.putArray("output").addObject().put("type", "function_call")
                         .put("call_id", "fetch-secret").put("name", "web_fetch")
-                        .put("arguments", "{\"url\":\"https://user:pass" + "@" + "example.com/docs\"}");
+                        .put("arguments", "{\"url\":\"https://user:pass" + "@"
+                                + "example.com/docs?safe=ok&token=query-secret\"}");
             } else {
                 response.putArray("output").addObject().put("type", "message").putArray("content")
                         .addObject().put("type", "output_text").put("text", "handled");
@@ -74,7 +75,33 @@ class AgentSessionStateTest {
         assertEquals("handled", agent.prompt("fetch"));
         String snapshot = agent.snapshotInput().toString();
         assertFalse(snapshot.contains("user:pass"), snapshot);
+        assertFalse(snapshot.contains("query-secret"), snapshot);
         assertTrue(snapshot.contains("[redacted]" + "@" + "example.com"));
+    }
+
+    @Test
+    void sensitiveStructuredToolArgumentsAreRedactedInSnapshots() throws Exception {
+        AtomicInteger step = new AtomicInteger();
+        ResponsesClient client = (input, tools, instructions) -> {
+            ObjectNode response = json.createObjectNode().put("status", "completed");
+            if (step.getAndIncrement() == 0) {
+                response.putArray("output").addObject().put("type", "function_call")
+                        .put("call_id", "command-secret").put("name", "run_command")
+                        .put("arguments", "{\"command\":\"echo ok\",\"api_key\":\"secret-value\","
+                                + "\"nested\":{\"password\":\"hidden\"}}");
+            } else {
+                response.putArray("output").addObject().put("type", "message").putArray("content")
+                        .addObject().put("type", "output_text").put("text", "handled");
+            }
+            return response;
+        };
+        Agent agent = agent(client, "instructions");
+        assertEquals("handled", agent.prompt("run"));
+        String snapshot = agent.snapshotInput().toString();
+        assertTrue(snapshot.contains("echo ok"), snapshot);
+        assertTrue(snapshot.contains("[redacted]"), snapshot);
+        assertFalse(snapshot.contains("secret-value"), snapshot);
+        assertFalse(snapshot.contains("hidden"), snapshot);
     }
 
     private Agent agent(ResponsesClient client, String instructions) {

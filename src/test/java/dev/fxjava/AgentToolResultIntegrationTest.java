@@ -34,12 +34,14 @@ class AgentToolResultIntegrationTest {
 
         assertEquals("Recovered full result", agent.prompt("find needle"));
         assertTrue(client.previewBytes < 8_000);
+        assertTrue(client.previewRedacted);
         assertTrue(client.queryOutput.contains("needle from full result"));
     }
 
     private final class DynamicClient implements ResponsesClient {
         int calls;
         int previewBytes;
+        boolean previewRedacted;
         String queryOutput;
 
         @Override
@@ -49,6 +51,7 @@ class AgentToolResultIntegrationTest {
             if (calls == 2) {
                 String preview = input.path(input.size() - 1).path("output").asText();
                 previewBytes = preview.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+                previewRedacted = preview.contains("API_KEY=[redacted]") && !preview.contains("secret-value");
                 Matcher matcher = HANDLE.matcher(preview);
                 assertTrue(matcher.find());
                 return function("call-read", "read_tool_result", json.createObjectNode()
@@ -84,7 +87,7 @@ class AgentToolResultIntegrationTest {
         @Override public boolean requiresApproval() { return false; }
         @Override public String preview(JsonNode arguments) { return "large"; }
         @Override public String execute(JsonNode arguments) {
-            return "preview\nneedle from full result\n" + "x".repeat(20_000);
+            return "API_KEY=secret-value\nneedle from full result\n" + "x".repeat(20_000);
         }
     }
 }

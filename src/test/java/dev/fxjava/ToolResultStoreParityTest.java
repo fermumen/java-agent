@@ -60,9 +60,25 @@ class ToolResultStoreParityTest {
     void smallResultsStayInlineAndEphemeralModeStillSupportsHandles() throws Exception {
         ToolResultStore store = new ToolResultStore(root);
         assertEquals("small", store.prepare("call", "tool", "small"));
+        assertEquals("API_KEY=\"[redacted]\"", store.prepare("secret", "tool", "API_KEY=\"secret-value\""));
         String prepared = store.prepare("call", "tool", "x".repeat(20_000));
         Matcher match = HANDLE.matcher(prepared);
         assertTrue(match.find());
         assertTrue(store.read(match.group(1), 1, 32, null).contains("xxxxxxxx"));
+    }
+
+    @Test
+    void largeResultsAreRedactedBeforePreviewAndDiskPersistence() throws Exception {
+        ToolResultStore store = new ToolResultStore(root);
+        store.setSession("session-secret");
+        String prepared = store.prepare("call-secret", "run_command",
+                "api_key=super-secret-value\n" + "x".repeat(20_000));
+        assertTrue(prepared.contains("api_key=[redacted]"));
+        assertTrue(!prepared.contains("super-secret-value"));
+        Matcher match = HANDLE.matcher(prepared);
+        assertTrue(match.find());
+        String stored = store.read(match.group(1), 1, 512, null);
+        assertTrue(stored.contains("api_key=[redacted]"));
+        assertTrue(!stored.contains("super-secret-value"));
     }
 }

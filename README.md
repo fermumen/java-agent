@@ -23,6 +23,7 @@ standard corporate JVM proxy and trust-store settings continue to apply.
 - Strict fx-compatible skill metadata and no-auth `skills` list/show/create/remove/local-install commands
 - Content-addressed session image sidecars with MIME, digest, size, and symlink verification
 - fx-compatible persistent memory plus session-scoped large tool-result previews, bounded paging, and literal search
+- fx-compatible masking of provider tokens, credential URLs, and sensitive assignments before model replay or sidecar persistence
 - Interactive FX-shaped multiple-choice clarification with a noninteractive sentinel
 - Direct bounded public `web_fetch` with redirect revalidation, HTML text conversion, caching, and credential redaction
 - MCP stdio, Streamable HTTP, and deprecated HTTP+SSE tools, live catalog refresh,
@@ -101,7 +102,9 @@ The base URL may be the API base or the complete `/responses` endpoint. Run
 The client sends `store=false` and manages conversation state locally in atomic, workspace-scoped snapshots. Use `--resume last` (or a session ID), `--no-save`, and `JAVA_AGENT_HOME` to
 control persistence. It asks
 the API to return `reasoning.encrypted_content`, then preserves all response
-output items when continuing a conversation or returning tool results. This
+output items when continuing a conversation or returning tool results. Sensitive
+tool arguments and results are masked before durable snapshots, model replay,
+previews, and tool-result sidecars. This
 supports stateless operation and avoids relying on server-stored response IDs.
 
 ## Safety boundary

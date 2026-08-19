@@ -195,23 +195,12 @@ public final class Agent {
         message.put("content", content);
     }
 
-    private static JsonNode persistable(JsonNode item) {
+    private JsonNode persistable(JsonNode item) {
         JsonNode copy = item.deepCopy();
         if (copy instanceof ObjectNode object && object.path("type").asText().equals("function_call")
-                && object.path("name").asText().equals("web_fetch") && object.path("arguments").isTextual()) {
-            String raw = object.path("arguments").asText();
-            int scheme = raw.indexOf("://");
-            int authorityEnd = raw.length();
-            if (scheme >= 0) {
-                for (char delimiter : new char[]{'/', '?', '#', '"'}) {
-                    int found = raw.indexOf(delimiter, scheme + 3);
-                    if (found >= 0) authorityEnd = Math.min(authorityEnd, found);
-                }
-            }
-            int at = scheme < 0 ? -1 : raw.indexOf("@", scheme + 3);
-            if (at > scheme + 3 && at < authorityEnd) {
-                object.put("arguments", raw.substring(0, scheme + 3) + "[redacted]" + raw.substring(at));
-            }
+                && object.path("arguments").isTextual()) {
+            object.put("arguments", SecretRedactor.arguments(json, object.path("name").asText(),
+                    object.path("arguments").asText()));
         }
         return copy;
     }

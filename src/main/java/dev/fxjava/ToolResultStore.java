@@ -42,8 +42,9 @@ final class ToolResultStore {
     }
 
     synchronized String prepare(String callId, String toolName, String output) throws IOException {
-        byte[] bytes = output.getBytes(StandardCharsets.UTF_8);
-        if (bytes.length <= LARGE_RESULT_BYTES) return output;
+        String redacted = SecretRedactor.mask(output);
+        byte[] bytes = redacted.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length <= LARGE_RESULT_BYTES) return redacted;
         if (bytes.length > STORED_MAX_BYTES) {
             bytes = Arrays.copyOf(bytes, utf8BackwardBoundary(bytes, STORED_MAX_BYTES));
         }

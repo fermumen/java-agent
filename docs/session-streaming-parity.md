@@ -23,6 +23,8 @@ observable contracts:
 - stable session-scoped sidecar handles for tool output over 16 KiB, 4 KiB
   UTF-8-safe previews, 64 KiB bounded reads, literal line queries, digest
   verification, recovery copying, and deletion;
+- provider-token, credentialed-URL, sensitive-assignment, and structured JSON
+  argument masking before model replay, previews, snapshots, and sidecar writes;
 - defensive deep copies at persistence and agent boundaries;
 - repair of a function call interrupted before its matching output;
 - streamed text deltas followed by the canonical `response.completed` object;
@@ -31,7 +33,8 @@ observable contracts:
 The relevant Java owners are `SessionStoreTest`, `AgentSessionStateTest`,
 `AgentInterruptedRecoveryTest`, `ResponsesStreamingTest`, and
 `MainSessionIntegrationTest`, `ToolResultStoreParityTest`,
-`AgentToolResultIntegrationTest`, and `ToolResultSessionLifecycleTest`.
+`AgentToolResultIntegrationTest`, `ToolResultSessionLifecycleTest`, and
+`SecretRedactorTest`.
 
 ## Storage shape
 
