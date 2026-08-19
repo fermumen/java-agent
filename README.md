@@ -14,6 +14,7 @@ standard corporate JVM proxy and trust-store settings continue to apply.
 - Structured `ask --json` output with per-turn tool outcomes
 - Interactive sessions and one-shot `ask` mode
 - Native Responses SSE streaming with incremental text output
+- Bounded `Retry-After`/exponential recovery for pre-output 429 and transient 5xx Responses statuses
 - Stateless API requests with `store=false`
 - Atomic local sessions with latest/resume/recover and corrupt-record isolation
 - Replay of response output items, including encrypted reasoning content

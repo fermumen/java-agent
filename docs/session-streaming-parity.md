@@ -28,13 +28,16 @@ observable contracts:
 - defensive deep copies at persistence and agent boundaries;
 - repair of a function call interrupted before its matching output;
 - streamed text deltas followed by the canonical `response.completed` object;
+- replay-safe pre-output retries for HTTP 429/500/502/503/504, with the fx
+  ten-attempt budget, bounded `Retry-After`, and capped exponential pacing;
 - explicit failure for failed, incomplete, or truncated SSE streams.
 
 The relevant Java owners are `SessionStoreTest`, `AgentSessionStateTest`,
 `AgentInterruptedRecoveryTest`, `ResponsesStreamingTest`, and
 `MainSessionIntegrationTest`, `ToolResultStoreParityTest`,
 `AgentToolResultIntegrationTest`, `ToolResultSessionLifecycleTest`, and
-`SecretRedactorTest`.
+`SecretRedactorTest`; `OpenAiResponsesRetryTest` owns retry exhaustion,
+status classification, pacing, and the no-partial-stream-replay boundary.
 
 ## Storage shape
 
@@ -58,5 +61,7 @@ enter Responses history.
 
 This phase does not claim fx's schema migration, artifact manifests, Responses
 compaction, or background-process recovery. Those remain separate parity work.
+Transport failures and streams that have started producing output are surfaced
+without automatic replay because delivery cannot be proven safe.
 The network transport is native
 OpenAI Responses SSE (`stream=true`), not Vercel AI Gateway streaming.
