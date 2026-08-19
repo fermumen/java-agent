@@ -78,7 +78,8 @@ class TerminalToolContractTest {
     @Test
     void writeFeedsAStartedProcessAndReadUsesByteCursor() throws Exception {
         Tool terminal = terminal();
-        String command = windows() ? "set /p line= & call echo got:%%line%%" : "read line; printf 'got:%s' \"$line\"";
+        String command = windows()
+                ? "powershell -NoProfile -NonInteractive -Command \"$line=[Console]::In.ReadLine(); [Console]::Out.Write('got:'+$line)\"" : "read line; printf 'got:%s' \"$line\"";
         JsonNode started = call(terminal, args("action", "start", "command", command));
         String id = started.path("success").path("start").path("session").path("session_id").asText();
 
