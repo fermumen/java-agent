@@ -181,12 +181,12 @@ final class McpRuntime implements AutoCloseable {
         boolean enabled = booleanField(node, "enabled", true);
         boolean required = booleanField(node, "required", false);
         String type = node.path("type").asText("stdio");
-        if (!type.equals("stdio") && !type.equals("local") && !type.equals("http")) {
+        if (!type.equals("stdio") && !type.equals("local") && !type.equals("http") && !type.equals("sse")) {
             throw new IOException("MCP server " + name + " uses unsupported transport: " + type);
         }
         List<String> command = new ArrayList<>();
         String url = null;
-        if (type.equals("http")) {
+        if (type.equals("http") || type.equals("sse")) {
             url = validateRemoteUrl(name, node.path("url").asText());
         } else {
             JsonNode commandNode = node.get("command");
@@ -340,6 +340,7 @@ final class McpRuntime implements AutoCloseable {
         private BufferedWriter writer;
         private HttpClient http;
         private URI endpoint;
+        private SseInput eventStream;
         private String sessionId;
         private String protocolVersion = "2025-06-18";
         private boolean handshakeComplete;
@@ -351,10 +352,11 @@ final class McpRuntime implements AutoCloseable {
         }
 
         void start() throws IOException {
-            if (config.type().equals("http")) {
+            if (config.type().equals("http") || config.type().equals("sse")) {
                 endpoint = URI.create(config.url());
                 http = HttpClient.newBuilder().connectTimeout(Duration.ofMillis(config.startupTimeoutMs()))
                         .followRedirects(HttpClient.Redirect.NEVER).build();
+                if (config.type().equals("sse")) discoverLegacySseEndpoint();
             } else {
                 ProcessBuilder builder = new ProcessBuilder(config.command());
                 builder.environment().remove("OPENAI_API_KEY");
@@ -370,10 +372,10 @@ final class McpRuntime implements AutoCloseable {
 
         private void handshake() throws IOException {
             sessionId = null;
-            protocolVersion = "2025-06-18";
+            protocolVersion = config.type().equals("sse") ? "2024-11-05" : "2025-06-18";
             handshakeComplete = false;
             ObjectNode params = json.createObjectNode();
-            params.put("protocolVersion", "2025-06-18");
+            params.put("protocolVersion", protocolVersion);
             params.putObject("capabilities");
             params.putObject("clientInfo").put("name", "java-agent").put("version", "0.2.0");
             JsonNode initialized = request("initialize", params, config.startupTimeoutMs());
@@ -381,6 +383,9 @@ final class McpRuntime implements AutoCloseable {
                 throw new IOException("MCP initialize returned an invalid result for " + config.name());
             }
             protocolVersion = initialized.path("protocolVersion").asText();
+            if (config.type().equals("sse") && !protocolVersion.equals("2024-11-05")) {
+                throw new IOException("MCP HTTP+SSE requires protocol version 2024-11-05");
+            }
             handshakeComplete = true;
             notify("notifications/initialized", json.createObjectNode());
         }
@@ -426,7 +431,7 @@ final class McpRuntime implements AutoCloseable {
             long id = nextId++;
             ObjectNode request = json.createObjectNode().put("jsonrpc", "2.0").put("id", id).put("method", method);
             request.set("params", params);
-            if (http != null) {
+            if (http != null && !config.type().equals("sse")) {
                 try {
                     return requestHttp(request, id, method, timeoutMs);
                 } catch (McpSessionExpired expired) {
@@ -466,6 +471,142 @@ final class McpRuntime implements AutoCloseable {
                 if (hasError) throw new IOException("MCP " + method + " failed: "
                         + envelope.path("error").path("message").asText("protocol error"));
                 return envelope.get("result");
+            }
+        }
+
+        private void discoverLegacySseEndpoint() throws IOException {
+            URI discovery = endpoint;
+            HttpRequest.Builder builder = HttpRequest.newBuilder(discovery)
+                    .timeout(Duration.ofMillis(config.startupTimeoutMs()))
+                    .header("Accept", "text/event-stream").GET();
+            for (var header : config.headers().entrySet()) builder.header(header.getKey(), header.getValue());
+            HttpResponse<InputStream> response;
+            try {
+                response = http.send(builder.build(), HttpResponse.BodyHandlers.ofInputStream());
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IOException("MCP HTTP+SSE discovery interrupted", interrupted);
+            }
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                response.body().close();
+                throw new IOException("MCP HTTP+SSE discovery returned " + response.statusCode());
+            }
+            String contentType = response.headers().firstValue("Content-Type").orElse("")
+                    .toLowerCase(java.util.Locale.ROOT);
+            if (!contentType.startsWith("text/event-stream")) {
+                response.body().close();
+                throw new IOException("MCP HTTP+SSE discovery has unsupported content type: " + contentType);
+            }
+            eventStream = new SseInput(response.body());
+            while (true) {
+                SseEvent event = readSseEvent(eventStream);
+                if (event == null) throw new IOException("MCP HTTP+SSE discovery ended before endpoint");
+                if (!event.kind().equals("endpoint")) continue;
+                endpoint = resolveLegacyEndpoint(discovery, event.data());
+                startDaemon("mcp-" + config.name() + "-sse", this::readLegacySse);
+                return;
+            }
+        }
+
+        private URI resolveLegacyEndpoint(URI discovery, String value) throws IOException {
+            if (value.isBlank() || value.length() > 8192) throw new IOException("Invalid MCP HTTP+SSE endpoint");
+            URI resolved;
+            try {
+                resolved = discovery.resolve(value);
+            } catch (IllegalArgumentException invalid) {
+                throw new IOException("Invalid MCP HTTP+SSE endpoint", invalid);
+            }
+            if (resolved.getUserInfo() != null || resolved.getFragment() != null
+                    || !sameOrigin(discovery, resolved)) {
+                throw new IOException("MCP HTTP+SSE endpoint must stay on the discovery origin");
+            }
+            return resolved;
+        }
+
+        private static boolean sameOrigin(URI left, URI right) {
+            return left.getScheme() != null && right.getScheme() != null
+                    && left.getHost() != null && right.getHost() != null
+                    && left.getScheme().equalsIgnoreCase(right.getScheme())
+                    && left.getHost().equalsIgnoreCase(right.getHost())
+                    && effectivePort(left) == effectivePort(right);
+        }
+
+        private static int effectivePort(URI uri) {
+            if (uri.getPort() >= 0) return uri.getPort();
+            return uri.getScheme().equalsIgnoreCase("https") ? 443 : 80;
+        }
+
+        private void readLegacySse() {
+            try {
+                for (SseEvent event; (event = readSseEvent(eventStream)) != null;) {
+                    if (event.kind().equals("message")) inbound.put(event.data());
+                }
+            } catch (Exception ignored) {
+                // The waiting request observes EOF below.
+            } finally {
+                inbound.offer("<eof>");
+            }
+        }
+
+        private static SseEvent readSseEvent(SseInput input) throws IOException {
+            String kind = "message";
+            StringBuilder data = new StringBuilder();
+            boolean fields = false;
+            for (String line; (line = readSseLine(input)) != null;) {
+                if (line.isEmpty()) {
+                    if (fields) return new SseEvent(kind, data.toString());
+                    continue;
+                }
+                if (line.startsWith(":")) continue;
+                fields = true;
+                int separator = line.indexOf(':');
+                String field = separator < 0 ? line : line.substring(0, separator);
+                String value = separator < 0 ? "" : line.substring(separator + 1);
+                if (value.startsWith(" ")) value = value.substring(1);
+                if (field.equals("event")) kind = value;
+                if (field.equals("data")) {
+                    if (!data.isEmpty()) data.append("\n");
+                    data.append(value);
+                    if (data.length() > MAX_LINE_BYTES) throw new IOException("MCP SSE event exceeds 2 MiB");
+                }
+            }
+            return fields ? new SseEvent(kind, data.toString()) : null;
+        }
+
+        private record SseEvent(String kind, String data) { }
+
+        private static final class SseInput {
+            private final InputStream input;
+            private boolean skipLeadingLf;
+
+            private SseInput(InputStream input) {
+                this.input = input;
+            }
+
+            private void close() throws IOException {
+                input.close();
+            }
+        }
+
+        private void postLegacySse(ObjectNode message) throws IOException {
+            HttpRequest.Builder builder = HttpRequest.newBuilder(endpoint)
+                    .timeout(Duration.ofMillis(config.operationTimeoutMs()))
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json, text/event-stream");
+            for (var header : config.headers().entrySet()) builder.header(header.getKey(), header.getValue());
+            builder.POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(message)));
+            HttpResponse<InputStream> response;
+            try {
+                response = http.send(builder.build(), HttpResponse.BodyHandlers.ofInputStream());
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IOException("MCP HTTP+SSE request interrupted", interrupted);
+            }
+            try (InputStream body = response.body()) {
+                if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                    throw new IOException("MCP HTTP+SSE " + response.statusCode() + " from " + config.name() + ": "
+                            + abbreviate(new String(readBounded(body, 2000), StandardCharsets.UTF_8), 2000));
+                }
             }
         }
 
@@ -527,7 +668,7 @@ final class McpRuntime implements AutoCloseable {
         }
 
         private JsonNode ssePayload(InputStream body, long id, String method) throws IOException {
-            InputStream input = body;
+            SseInput input = new SseInput(body);
             StringBuilder data = new StringBuilder();
             for (String line; (line = readSseLine(input)) != null;) {
                 if (line.isEmpty()) {
@@ -554,13 +695,20 @@ final class McpRuntime implements AutoCloseable {
             return value;
         }
 
-        private static String readSseLine(InputStream input) throws IOException {
+        private static String readSseLine(SseInput source) throws IOException {
             ByteArrayOutputStream line = new ByteArrayOutputStream();
             while (true) {
-                int value = input.read();
+                int value = source.input.read();
                 if (value < 0) return line.size() == 0 ? null : line.toString(StandardCharsets.UTF_8);
+                if (source.skipLeadingLf) {
+                    source.skipLeadingLf = false;
+                    if (value == 10) continue;
+                }
                 if (value == 10) return line.toString(StandardCharsets.UTF_8);
-                if (value == 13) return line.toString(StandardCharsets.UTF_8);
+                if (value == 13) {
+                    source.skipLeadingLf = true;
+                    return line.toString(StandardCharsets.UTF_8);
+                }
                 line.write(value);
                 if (line.size() > MAX_LINE_BYTES) throw new IOException("MCP SSE line exceeds 2 MiB");
             }
@@ -592,8 +740,9 @@ final class McpRuntime implements AutoCloseable {
         private void notify(String method, ObjectNode params) throws IOException {
             ObjectNode notification = json.createObjectNode().put("jsonrpc", "2.0").put("method", method);
             notification.set("params", params);
-            if (http != null) postHttp(notification, config.operationTimeoutMs(), false).body().close();
-            else send(notification);
+            if (http != null && !config.type().equals("sse")) {
+                postHttp(notification, config.operationTimeoutMs(), false).body().close();
+            } else send(notification);
         }
 
         private void respondUnsupported(JsonNode id) throws IOException {
@@ -605,6 +754,10 @@ final class McpRuntime implements AutoCloseable {
 
         private void send(ObjectNode value) throws IOException {
             if (closed.get()) throw new IOException("MCP server is closed: " + config.name());
+            if (config.type().equals("sse")) {
+                postLegacySse(value);
+                return;
+            }
             writer.write(json.writeValueAsString(value));
             writer.newLine();
             writer.flush();
@@ -639,7 +792,10 @@ final class McpRuntime implements AutoCloseable {
         @Override
         public void close() {
             if (!closed.compareAndSet(false, true)) return;
-            if (http != null && sessionId != null) {
+            if (eventStream != null) {
+                try { eventStream.close(); } catch (IOException ignored) { }
+            }
+            if (http != null && sessionId != null && !config.type().equals("sse")) {
                 try {
                     HttpRequest.Builder request = HttpRequest.newBuilder(endpoint)
                             .timeout(Duration.ofSeconds(5)).header("Mcp-Session-Id", sessionId)

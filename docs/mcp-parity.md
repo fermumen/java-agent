@@ -2,7 +2,7 @@
 
 The Java runtime reads fx-compatible local MCP profiles from
 `<session-root>/mcp.json` or `--mcp-config <path>`. It implements stdio and MCP
-2025-06-18 Streamable HTTP tool paths without routing traffic through Vercel AI
+2025-06-18 Streamable HTTP and deprecated HTTP+SSE tool paths without routing traffic through Vercel AI
 Gateway.
 
 ## Ported contracts
@@ -16,7 +16,8 @@ The source owners are `fx/src/builtins/mcp.zig`,
   policy, and bounded startup/operation timeouts;
 - `initialize` followed by `notifications/initialized`;
 - Streamable HTTP JSON and SSE response bodies, HTTPS-or-loopback URL policy, safe custom headers, session and protocol-version propagation, optional session IDs, and best-effort DELETE teardown;
-- bounded HTTP bodies plus chunked mixed-CR/LF SSE parsing that returns on a matching event without waiting for EOF;
+- deprecated HTTP+SSE endpoint discovery with same-origin enforcement, exact 2024-11-05 negotiation, POST message routing, custom headers, and stream-only cleanup;
+- bounded HTTP bodies plus chunked CR, LF, and CRLF SSE parsing that returns on a matching event without waiting for EOF;
 - strict JSON-RPC 2.0 response envelopes and correlated numeric IDs;
 - paginated `tools/list`, deterministic sorting, metadata search, exact selection with next-step schema publication, duplicate tool/cursor
   rejection, and catalog/page limits;
@@ -34,11 +35,12 @@ The source owners are `fx/src/builtins/mcp.zig`,
   deterministic child-process teardown.
 
 The main owners are `McpRuntimeTest`, `McpValidationTest`,
-`McpHealthPolicyTest`, and `MainMcpIntegrationTest`.
+`McpHealthPolicyTest`, `McpHttpRuntimeTest`, `McpLegacyHttpSseTest`, and
+`MainMcpIntegrationTest`.
 
 ## Remaining MCP work
 
-MCP OAuth/credential storage, GET listeners and subscriptions, deprecated
-HTTP+SSE, automatic expired-request replay, server elicitation, live reload,
+MCP OAuth/credential storage, Streamable HTTP GET listeners and subscriptions,
+automatic expired-request replay, server elicitation, live reload,
 and health/status commands remain unimplemented. These are not counted as
 parity yet.
