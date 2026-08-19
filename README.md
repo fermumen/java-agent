@@ -28,8 +28,9 @@ standard corporate JVM proxy and trust-store settings continue to apply.
 - Interactive FX-shaped multiple-choice clarification with a noninteractive sentinel
 - Direct bounded public `web_fetch` with redirect revalidation, HTML text conversion, caching, and credential redaction
 - MCP stdio, Streamable HTTP, and deprecated HTTP+SSE tools, live catalog refresh,
-  metadata search/selection, resources, prompts, completion, strict validation,
-  health policy, atomic local config reload, and no-auth status reporting
+  metadata search/selection, resources, negotiated subscribe-on-read with
+  filtered updates, prompts, completion, strict validation, health policy,
+  atomic local config reload, and no-auth status reporting
 - Captured `run_command` execution with a timeout and bounded output
 - FX-shaped `terminal` actions for captured exec, bounded background-process
   lifecycles, plain-output screen snapshots, and process-lifetime monitors

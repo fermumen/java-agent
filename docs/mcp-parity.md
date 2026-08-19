@@ -26,6 +26,10 @@ The source owners are `fx/src/builtins/mcp.zig`,
   `$ref` rejection;
 - read-only annotations mapped to approval policy;
 - paginated resources, templates, and prompts; resource reads, prompt gets, and prompt/resource completion;
+- capability-gated `resources/subscribe` after the first successful URI read,
+  exact once-per-session subscription deduplication, bounded subscription
+  cardinality, thread-safe filtering of `notifications/resources/updated`, and
+  capability-gated resource/prompt list-change accounting;
 - `tools/call` with exact arguments and preservation of text, image, audio,
   resource, resource-link, structured, and tool-error fields;
 - bounded structural validation, result size, media base64, inbound queue, and
@@ -49,6 +53,8 @@ The main owners are `McpRuntimeTest`, `McpValidationTest`,
 
 ## Remaining MCP work
 
-MCP OAuth/credential storage, modern filtered subscriptions/listening,
-automatic expired-request replay, and server elicitation remain unimplemented.
-These are not counted as parity yet.
+MCP OAuth/credential storage, fx's multiplexed modern
+`subscriptions/listen` channel, automatic expired-request replay, and server
+elicitation remain unimplemented. These are not counted as parity yet. Standard
+MCP resource subscriptions are implemented; a recovered HTTP session subscribes
+again after its next successful resource read.

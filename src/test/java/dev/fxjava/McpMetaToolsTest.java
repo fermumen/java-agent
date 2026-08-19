@@ -11,6 +11,7 @@ import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class McpMetaToolsTest {
     private final ObjectMapper json = new ObjectMapper();
@@ -41,7 +42,13 @@ class McpMetaToolsTest {
             assertTrue(execute(features, "resource_list").contains("fixture:///two"));
             assertTrue(execute(features, "resource_templates").contains("fixture:///{name}"));
             assertTrue(features.execute(base("resource_read").put("uri", "fixture:///one"))
-                    .contains("resource body"));
+                    .contains("subscriptions=0"));
+            assertTrue(features.execute(base("resource_read").put("uri", "fixture:///one"))
+                    .contains("subscriptions=1"));
+            assertEquals(1, runtime.healthReport().path("servers").path(0)
+                    .path("resource_subscriptions").asInt());
+            assertEquals(1, runtime.healthReport().path("servers").path(0)
+                    .path("resource_updates").asInt());
             assertTrue(execute(features, "prompt_list").contains("review"));
             ObjectNode promptGet = base("prompt_get").put("prompt", "review");
             promptGet.putObject("arguments").put("scope", "changes");

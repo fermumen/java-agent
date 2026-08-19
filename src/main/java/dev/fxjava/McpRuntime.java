@@ -29,8 +29,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /** Compact bounded MCP stdio and Streamable HTTP client. */
 final class McpRuntime implements AutoCloseable {
@@ -162,6 +164,10 @@ final class McpRuntime implements AutoCloseable {
                 value.put("tools", (int) remoteTools.stream()
                         .filter(tool -> tool.server == entry.server()).count());
                 value.put("listener", entry.server().listenerState());
+                value.put("resource_subscriptions", entry.server().resourceSubscriptions.size());
+                value.put("resource_updates", entry.server().resourceUpdates.get());
+                value.put("resource_list_changes", entry.server().resourceListChanges.get());
+                value.put("prompt_list_changes", entry.server().promptListChanges.get());
             }
             if (entry.error() == null) value.putNull("error"); else value.put("error", entry.error());
         }
@@ -321,7 +327,11 @@ final class McpRuntime implements AutoCloseable {
     JsonNode featureRequest(String serverName, String method, ObjectNode params) throws IOException {
         refreshChangedServers();
         Server server = server(serverName);
-        return server.request(method, params, server.config.operationTimeoutMs());
+        JsonNode result = server.request(method, params, server.config.operationTimeoutMs());
+        if (method.equals("resources/read")) {
+            server.ensureResourceSubscription(params.path("uri").asText());
+        }
+        return result;
     }
 
     JsonNode pagedFeature(String serverName, String method, String arrayField) throws IOException {
@@ -537,6 +547,13 @@ final class McpRuntime implements AutoCloseable {
         private volatile boolean listenerAttempted;
         private volatile boolean listenerFinished;
         private final AtomicBoolean toolsChanged = new AtomicBoolean();
+        private final Set<String> resourceSubscriptions = ConcurrentHashMap.newKeySet();
+        private final AtomicLong resourceUpdates = new AtomicLong();
+        private final AtomicLong resourceListChanges = new AtomicLong();
+        private final AtomicLong promptListChanges = new AtomicLong();
+        private boolean resourcesSubscribe;
+        private boolean resourcesListChanged;
+        private boolean promptsListChanged;
         private String sessionId;
         private String protocolVersion = "2025-06-18";
         private boolean handshakeComplete;
@@ -570,6 +587,10 @@ final class McpRuntime implements AutoCloseable {
             sessionId = null;
             protocolVersion = config.type().equals("sse") ? "2024-11-05" : "2025-06-18";
             handshakeComplete = false;
+            resourcesSubscribe = false;
+            resourcesListChanged = false;
+            promptsListChanged = false;
+            resourceSubscriptions.clear();
             ObjectNode params = json.createObjectNode();
             params.put("protocolVersion", protocolVersion);
             params.putObject("capabilities");
@@ -579,6 +600,12 @@ final class McpRuntime implements AutoCloseable {
                 throw new IOException("MCP initialize returned an invalid result for " + config.name());
             }
             protocolVersion = initialized.path("protocolVersion").asText();
+            resourcesSubscribe = initialized.path("capabilities").path("resources")
+                    .path("subscribe").asBoolean(false);
+            resourcesListChanged = initialized.path("capabilities").path("resources")
+                    .path("listChanged").asBoolean(false);
+            promptsListChanged = initialized.path("capabilities").path("prompts")
+                    .path("listChanged").asBoolean(false);
             if (config.type().equals("sse") && !protocolVersion.equals("2024-11-05")) {
                 throw new IOException("MCP HTTP+SSE requires protocol version 2024-11-05");
             }
@@ -660,7 +687,10 @@ final class McpRuntime implements AutoCloseable {
                     respondUnsupported(envelope.get("id"));
                     continue;
                 }
-                if (!envelope.has("id")) continue;
+                if (!envelope.has("id")) {
+                    marksNotification(envelope);
+                    continue;
+                }
                 if (!envelope.path("id").canConvertToLong() || envelope.path("id").asLong() != id) continue;
                 boolean hasResult = envelope.has("result");
                 boolean hasError = envelope.has("error");
@@ -668,6 +698,27 @@ final class McpRuntime implements AutoCloseable {
                 if (hasError) throw new IOException("MCP " + method + " failed: "
                         + envelope.path("error").path("message").asText("protocol error"));
                 return envelope.get("result");
+            }
+        }
+
+        void ensureResourceSubscription(String uri) throws IOException {
+            if (!resourcesSubscribe || config.type().equals("sse")) return;
+            if (uri == null || uri.isBlank() || uri.length() > 8192) {
+                throw new IOException("MCP resource subscription has invalid URI");
+            }
+            synchronized (this) {
+                if (resourceSubscriptions.contains(uri)) return;
+                if (resourceSubscriptions.size() >= MAX_TOOLS) {
+                    throw new IOException("MCP resource subscription limit exceeded");
+                }
+                resourceSubscriptions.add(uri);
+                try {
+                    request("resources/subscribe", json.createObjectNode().put("uri", uri),
+                            config.operationTimeoutMs());
+                } catch (IOException failure) {
+                    resourceSubscriptions.remove(uri);
+                    throw failure;
+                }
             }
         }
 
@@ -736,7 +787,7 @@ final class McpRuntime implements AutoCloseable {
         private void readLegacySse() {
             try {
                 for (SseEvent event; (event = readSseEvent(eventStream)) != null;) {
-                    if (event.kind().equals("message") && !marksToolListChanged(event.data())) {
+                    if (event.kind().equals("message") && !marksNotification(event.data())) {
                         inbound.put(event.data());
                     }
                 }
@@ -747,10 +798,26 @@ final class McpRuntime implements AutoCloseable {
             }
         }
 
-        private boolean marksToolListChanged(String data) throws IOException {
-            JsonNode envelope = json.readTree(data);
+        private boolean marksNotification(String data) throws IOException {
+            return marksNotification(json.readTree(data));
+        }
+
+        private boolean marksNotification(JsonNode envelope) {
             if (envelope.path("method").asText().equals("notifications/tools/list_changed")) {
                 toolsChanged.set(true);
+                return true;
+            }
+            if (envelope.path("method").asText().equals("notifications/resources/updated")) {
+                String uri = envelope.path("params").path("uri").asText();
+                if (resourceSubscriptions.contains(uri)) resourceUpdates.incrementAndGet();
+                return true;
+            }
+            if (envelope.path("method").asText().equals("notifications/resources/list_changed")) {
+                if (resourcesListChanged) resourceListChanges.incrementAndGet();
+                return true;
+            }
+            if (envelope.path("method").asText().equals("notifications/prompts/list_changed")) {
+                if (promptsListChanged) promptListChanges.incrementAndGet();
                 return true;
             }
             return false;
@@ -786,7 +853,7 @@ final class McpRuntime implements AutoCloseable {
                     active = new SseInput(response.body());
                     listenerStream = active;
                     for (SseEvent event; (event = readSseEvent(active)) != null;) {
-                        if (event.kind().equals("message")) marksToolListChanged(event.data());
+                        if (event.kind().equals("message")) marksNotification(event.data());
                     }
                 } catch (InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
