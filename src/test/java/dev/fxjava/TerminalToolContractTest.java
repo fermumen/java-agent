@@ -6,6 +6,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Locale;
@@ -78,27 +81,33 @@ class TerminalToolContractTest {
     @Test
     void writeFeedsAStartedProcessAndReadUsesByteCursor() throws Exception {
         Tool terminal = terminal();
-        String command = windows()
-                ? "powershell -NoProfile -NonInteractive -Command \"$line=[Console]::In.ReadLine(); [Console]::Out.Write('got:'+$line)\"" : "read line; printf 'got:%s' \"$line\"";
+        String command = shellQuote(Path.of(System.getProperty("java.home"), "bin",
+                        windows() ? "java.exe" : "java").toString())
+                + " -cp " + shellQuote(System.getProperty("java.class.path"))
+                + " dev.fxjava.TerminalStdinEchoFixture";
         JsonNode started = call(terminal, args("action", "start", "command", command));
         String id = started.path("success").path("start").path("session").path("session_id").asText();
+        try {
+            ObjectNode payload = json.createObjectNode().put("kind", "text")
+                    .put("text", windows() ? "hello\r\n" : "hello\n");
+            JsonNode written = call(terminal, args("action", "write", "session_id", id, "write", payload));
+            assertEquals(windows() ? 7 : 6, written.path("success").path("write")
+                    .path("accepted_bytes").asInt());
+            JsonNode waited = call(terminal, args("action", "wait", "session_id", id,
+                    "return_when", json.createObjectNode().put("kind", "exit"), "wait_ceiling_ms", 10_000));
+            assertEquals(0, waited.path("success").path("wait").path("outcome").path("exited").asInt(-1));
 
-        ObjectNode payload = json.createObjectNode().put("kind", "text")
-                .put("text", windows() ? "hello\r\n" : "hello\n");
-        JsonNode written = call(terminal, args("action", "write", "session_id", id, "write", payload));
-        assertEquals(windows() ? 7 : 6, written.path("success").path("write")
-                .path("accepted_bytes").asInt());
-        call(terminal, args("action", "wait", "session_id", id,
-                "return_when", json.createObjectNode().put("kind", "exit"), "wait_ceiling_ms", 5_000));
-
-        JsonNode first = call(terminal, args("action", "read", "session_id", id,
-                "cursor_segment", 1, "cursor_offset", 0));
-        String output = first.path("success").path("read").path("output").asText();
-        assertTrue(output.contains("got:hello"));
-        long end = first.path("success").path("read").path("raw_range").path("end").path("offset").asLong();
-        JsonNode second = call(terminal, args("action", "read", "session_id", id,
-                "cursor_segment", 1, "cursor_offset", end));
-        assertEquals("", second.path("success").path("read").path("output").asText());
+            JsonNode first = call(terminal, args("action", "read", "session_id", id,
+                    "cursor_segment", 1, "cursor_offset", 0));
+            String output = first.path("success").path("read").path("output").asText();
+            assertTrue(output.contains("got:hello"));
+            long end = first.path("success").path("read").path("raw_range").path("end").path("offset").asLong();
+            JsonNode second = call(terminal, args("action", "read", "session_id", id,
+                    "cursor_segment", 1, "cursor_offset", end));
+            assertEquals("", second.path("success").path("read").path("output").asText());
+        } finally {
+            call(terminal, args("action", "close", "session_id", id, "close_policy", "force"));
+        }
     }
 
     @Test
@@ -134,5 +143,21 @@ class TerminalToolContractTest {
 
     private static boolean windows() {
         return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("windows");
+    }
+
+    private static String shellQuote(String value) {
+        if (windows()) return "\"" + value.replace("\"", "\"\"") + "\"";
+        return "'" + value.replace("'", "'\"'\"'") + "'";
+    }
+}
+
+final class TerminalStdinEchoFixture {
+    private TerminalStdinEchoFixture() { }
+
+    public static void main(String[] arguments) throws Exception {
+        BufferedReader input = new BufferedReader(
+                new InputStreamReader(System.in, StandardCharsets.UTF_8));
+        String line = input.readLine();
+        if (line != null) System.out.print("got:" + line);
     }
 }
