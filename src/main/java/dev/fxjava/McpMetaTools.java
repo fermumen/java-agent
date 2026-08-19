@@ -70,7 +70,7 @@ final class McpMetaTools {
         }
     }
 
-    private static final class Select extends MetaTool {
+    private static final class Select extends MetaTool implements DynamicToolProvider {
         Select(McpRuntime runtime) {
             super(runtime, oneStringSchema(runtime, "name", "Exact dynamic MCP tool name"));
         }
@@ -94,6 +94,14 @@ final class McpMetaTools {
                 return runtime.bounded(result);
             }
             throw new IOException("Unknown MCP tool: " + name);
+        }
+
+         public Tool resolveDynamicTool(String name) throws IOException {
+            return runtime.dynamicTool(name);
+        }
+
+         public List<Tool> dynamicTools() throws IOException {
+            return runtime.selectedTools();
         }
     }
 

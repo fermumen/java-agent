@@ -117,6 +117,11 @@ class McpHttpRuntimeTest {
         }
 
         private void handle(HttpExchange exchange) throws IOException {
+            if (exchange.getRequestMethod().equals("GET")) {
+                exchange.sendResponseHeaders(405, -1);
+                exchange.close();
+                return;
+            }
             if (exchange.getRequestMethod().equals("DELETE")) {
                 deletes.incrementAndGet();
                 deleted.set("session-1".equals(exchange.getRequestHeaders().getFirst("Mcp-Session-Id")));

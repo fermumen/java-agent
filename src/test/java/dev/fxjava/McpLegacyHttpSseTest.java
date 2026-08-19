@@ -61,6 +61,31 @@ class McpLegacyHttpSseTest {
     }
 
     @Test
+    void refreshesToolsThroughTheExistingDiscoveryStream() throws Exception {
+        try (Fixture fixture = new Fixture("\n", "/messages", "2024-11-05", true);
+             McpRuntime runtime = load(fixture, "list-changed.json")) {
+            assertTrue(fixture.changedSent.await(2, TimeUnit.SECONDS));
+            Tool search = runtime.tools().stream().filter(tool -> tool.name().equals("mcp_search_tools"))
+                    .findFirst().orElseThrow();
+            String found = "";
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (!found.contains("mcp__legacy__fresh") && System.nanoTime() < deadline) {
+                found = search.execute(json.createObjectNode().put("query", "fresh"));
+                if (!found.contains("mcp__legacy__fresh")) Thread.sleep(10);
+            }
+            assertTrue(found.contains("mcp__legacy__fresh"));
+            Tool select = runtime.tools().stream().filter(tool -> tool.name().equals("mcp_select_tool"))
+                    .findFirst().orElseThrow();
+            select.execute(json.createObjectNode().put("name", "mcp__legacy__fresh"));
+            Tool fresh = ((DynamicToolProvider) select).resolveDynamicTool("mcp__legacy__fresh");
+            assertTrue(fresh.execute(json.createObjectNode().put("text", "changed"))
+                    .contains("fresh:changed"));
+            assertEquals(1, fixture.discoveryGets.get());
+            assertEquals(2, fixture.toolsListCalls.get());
+        }
+    }
+
+    @Test
     void rejectsCrossOriginDiscoveredMessageEndpoint() throws Exception {
         try (Fixture fixture = new Fixture("\n", "http://localhost:%PORT%/messages", "2024-11-05")) {
             IOException failure = assertThrows(IOException.class, () -> load(fixture, "cross-origin.json"));
@@ -94,16 +119,26 @@ class McpLegacyHttpSseTest {
         private final String delimiter;
         private final String endpointEvent;
         private final String protocolVersion;
+        private final boolean listChanged;
         private final AtomicInteger discoveryGets = new AtomicInteger();
         private final AtomicInteger deletes = new AtomicInteger();
+        private final AtomicInteger toolsListCalls = new AtomicInteger();
+        private final CountDownLatch changedSent = new CountDownLatch(1);
         private final List<String> methods = new CopyOnWriteArrayList<>();
         private volatile OutputStream stream;
         private volatile String requestedProtocol;
+        private volatile String currentTool = "echo";
 
         Fixture(String delimiter, String endpointEvent, String protocolVersion) throws IOException {
+            this(delimiter, endpointEvent, protocolVersion, false);
+        }
+
+        Fixture(String delimiter, String endpointEvent, String protocolVersion, boolean listChanged)
+                throws IOException {
             this.delimiter = delimiter;
             this.endpointEvent = endpointEvent;
             this.protocolVersion = protocolVersion;
+            this.listChanged = listChanged;
             server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
             server.setExecutor(executor);
             server.createContext("/sse", this::discover);
@@ -161,19 +196,30 @@ class McpLegacyHttpSseTest {
                         .put("protocolVersion", protocolVersion)
                         .putObject("capabilities").putObject("tools");
                 case "tools/list" -> {
+                    toolsListCalls.incrementAndGet();
                     ObjectNode tool = response.putObject("result").putArray("tools").addObject();
-                    tool.put("name", "echo").put("description", "Legacy echo");
+                    tool.put("name", currentTool).put("description", "Legacy echo");
                     tool.putObject("annotations").put("readOnlyHint", true);
                     ObjectNode schema = tool.putObject("inputSchema").put("type", "object");
                     schema.putObject("properties").putObject("text").put("type", "string");
                 }
                 case "tools/call" -> response.putObject("result").putArray("content").addObject()
-                        .put("type", "text").put("text", "legacy:"
+                        .put("type", "text").put("text", (listChanged
+                                ? request.path("params").path("name").asText() : "legacy") + ":"
                                 + request.path("params").path("arguments").path("text").asText());
                 default -> throw new IOException("Unexpected request: " + method);
             }
             emit("event: message" + delimiter + "data: " + json.writeValueAsString(response)
                     + delimiter + delimiter);
+            if (listChanged && method.equals("tools/list") && toolsListCalls.get() == 1) {
+                currentTool = "fresh";
+                ObjectNode notification = json.createObjectNode().put("jsonrpc", "2.0")
+                        .put("method", "notifications/tools/list_changed");
+                notification.putObject("params");
+                emit("event: message" + delimiter + "data: " + json.writeValueAsString(notification)
+                        + delimiter + delimiter);
+                changedSent.countDown();
+            }
         }
 
         private void emit(String value) throws IOException {

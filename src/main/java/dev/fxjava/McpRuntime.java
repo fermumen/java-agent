@@ -40,6 +40,7 @@ final class McpRuntime implements AutoCloseable {
     private final ObjectMapper json;
     private final List<Server> servers;
     private final List<Tool> tools;
+    private volatile List<McpTool> remoteTools;
 
     private McpRuntime(ObjectMapper json, List<Server> servers, List<Tool> tools) {
         this.json = json;
@@ -48,6 +49,8 @@ final class McpRuntime implements AutoCloseable {
         if (!servers.isEmpty()) catalog.addAll(McpMetaTools.create(this));
         catalog.addAll(tools);
         this.tools = List.copyOf(catalog);
+        this.remoteTools = tools.stream().filter(McpTool.class::isInstance)
+                .map(McpTool.class::cast).toList();
     }
 
     static McpRuntime load(ObjectMapper json, Path configPath) throws IOException {
@@ -106,26 +109,71 @@ final class McpRuntime implements AutoCloseable {
 
     ObjectMapper json() { return json; }
 
-    List<McpToolInfo> toolCatalog() {
+    List<McpToolInfo> toolCatalog() throws IOException {
+        refreshChangedServers();
         List<McpToolInfo> result = new ArrayList<>();
-        for (Tool tool : tools) {
-            if (tool instanceof McpTool remote) {
-                result.add(new McpToolInfo(remote.publicName, remote.server.config.name(),
-                        remote.remote.name(), remote.remote.description(),
-                        remote.remote.inputSchema().deepCopy(), remote.remote.readOnly()));
-            }
+        for (McpTool remote : remoteTools) {
+            result.add(new McpToolInfo(remote.publicName, remote.server.config.name(),
+                    remote.remote.name(), remote.remote.description(),
+                    remote.remote.inputSchema().deepCopy(), remote.remote.readOnly()));
         }
         return List.copyOf(result);
     }
 
     void selectTool(String name) throws IOException {
-        for (Tool tool : tools) {
-            if (tool instanceof McpTool remote && remote.publicName.equals(name)) {
+        refreshChangedServers();
+        for (McpTool remote : remoteTools) {
+            if (remote.publicName.equals(name)) {
                 remote.selected = true;
                 return;
             }
         }
         throw new IOException("Unknown MCP tool: " + name);
+    }
+
+    Tool dynamicTool(String name) throws IOException {
+        refreshChangedServers();
+        for (McpTool remote : remoteTools) if (remote.publicName.equals(name)) return remote;
+        return null;
+    }
+
+    List<Tool> selectedTools() throws IOException {
+        refreshChangedServers();
+        return remoteTools.stream().filter(tool -> tool.selected).map(Tool.class::cast).toList();
+    }
+
+    private synchronized void refreshChangedServers() throws IOException {
+        for (Server server : servers) {
+            if (!server.toolsChanged.compareAndSet(true, false)) continue;
+            try {
+                replaceServerTools(server, server.discoverTools());
+            } catch (IOException failure) {
+                server.toolsChanged.set(true);
+                throw failure;
+            }
+        }
+    }
+
+    private void replaceServerTools(Server server, List<RemoteTool> discovered) throws IOException {
+        Set<String> selected = new HashSet<>();
+        List<McpTool> replacement = new ArrayList<>();
+        for (McpTool existing : remoteTools) {
+            if (existing.server == server) {
+                if (existing.selected) selected.add(existing.publicName);
+                existing.selected = false;
+            } else replacement.add(existing);
+        }
+        Set<String> names = new HashSet<>();
+        for (McpTool existing : replacement) names.add(existing.publicName);
+        for (RemoteTool remote : discovered) {
+            String name = publicName(server.config.name(), remote.name());
+            if (!names.add(name)) throw new IOException("Duplicate MCP tool identity: " + name);
+            McpTool tool = new McpTool(server, name, remote);
+            tool.selected = selected.contains(name);
+            replacement.add(tool);
+        }
+        replacement.sort((left, right) -> left.publicName.compareTo(right.publicName));
+        remoteTools = List.copyOf(replacement);
     }
 
     JsonNode featureRequest(String serverName, String method, ObjectNode params) throws IOException {
@@ -341,6 +389,8 @@ final class McpRuntime implements AutoCloseable {
         private HttpClient http;
         private URI endpoint;
         private SseInput eventStream;
+        private volatile SseInput listenerStream;
+        private final AtomicBoolean toolsChanged = new AtomicBoolean();
         private String sessionId;
         private String protocolVersion = "2025-06-18";
         private boolean handshakeComplete;
@@ -388,6 +438,7 @@ final class McpRuntime implements AutoCloseable {
             }
             handshakeComplete = true;
             notify("notifications/initialized", json.createObjectNode());
+            if (config.type().equals("http") && sessionId != null) startStreamableListener();
         }
 
         List<RemoteTool> discoverTools() throws IOException {
@@ -539,13 +590,65 @@ final class McpRuntime implements AutoCloseable {
         private void readLegacySse() {
             try {
                 for (SseEvent event; (event = readSseEvent(eventStream)) != null;) {
-                    if (event.kind().equals("message")) inbound.put(event.data());
+                    if (event.kind().equals("message") && !marksToolListChanged(event.data())) {
+                        inbound.put(event.data());
+                    }
                 }
             } catch (Exception ignored) {
                 // The waiting request observes EOF below.
             } finally {
                 inbound.offer("<eof>");
             }
+        }
+
+        private boolean marksToolListChanged(String data) throws IOException {
+            JsonNode envelope = json.readTree(data);
+            if (envelope.path("method").asText().equals("notifications/tools/list_changed")) {
+                toolsChanged.set(true);
+                return true;
+            }
+            return false;
+        }
+
+        private void startStreamableListener() {
+            SseInput previous = listenerStream;
+            if (previous != null) {
+                try { previous.close(); } catch (IOException ignored) { }
+            }
+            startDaemon("mcp-" + config.name() + "-listener", () -> {
+                SseInput active = null;
+                try {
+                    HttpRequest.Builder builder = HttpRequest.newBuilder(endpoint)
+                            .header("Accept", "text/event-stream");
+                    if (sessionId != null) builder.header("Mcp-Session-Id", sessionId);
+                    if (!protocolVersion.equals("2025-03-26")) {
+                        builder.header("MCP-Protocol-Version", protocolVersion);
+                    }
+                    for (var header : config.headers().entrySet()) {
+                        builder.header(header.getKey(), header.getValue());
+                    }
+                    HttpResponse<InputStream> response = http.send(builder.GET().build(),
+                            HttpResponse.BodyHandlers.ofInputStream());
+                    if (response.statusCode() < 200 || response.statusCode() >= 300
+                            || !response.headers().firstValue("Content-Type").orElse("")
+                            .toLowerCase(java.util.Locale.ROOT).startsWith("text/event-stream")) {
+                        response.body().close();
+                        return;
+                    }
+                    active = new SseInput(response.body());
+                    listenerStream = active;
+                    for (SseEvent event; (event = readSseEvent(active)) != null;) {
+                        if (event.kind().equals("message")) marksToolListChanged(event.data());
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                } catch (Exception ignored) {
+                    // Listener support is optional; requests continue over POST.
+                } finally {
+                    if (listenerStream == active) listenerStream = null;
+                    if (active != null) try { active.close(); } catch (IOException ignored) { }
+                }
+            });
         }
 
         private static SseEvent readSseEvent(SseInput input) throws IOException {
@@ -792,6 +895,9 @@ final class McpRuntime implements AutoCloseable {
         @Override
         public void close() {
             if (!closed.compareAndSet(false, true)) return;
+            if (listenerStream != null) {
+                try { listenerStream.close(); } catch (IOException ignored) { }
+            }
             if (eventStream != null) {
                 try { eventStream.close(); } catch (IOException ignored) { }
             }

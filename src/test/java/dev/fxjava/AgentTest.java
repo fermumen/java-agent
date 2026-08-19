@@ -54,6 +54,18 @@ class AgentTest {
     }
 
     @Test
+    void advertisesAndDispatchesToolsFromADynamicProvider() throws Exception {
+        FakeClient client = new FakeClient(toolResponse("call-dynamic", "fresh", "{\"value\":\"now\"}"),
+                textResponse("Refreshed"));
+        Agent agent = new Agent(json, client, List.of(new ProviderTool()), (tool, arguments) -> true,
+                new PrintStream(new ByteArrayOutputStream()), 5, "system");
+
+        assertEquals("Refreshed", agent.prompt("Use fresh"));
+        assertEquals("fresh", client.toolDefinitions.get(0).path(0).path("name").asText());
+        assertEquals("echo: now", client.requests.get(1).path(3).path("output").asText());
+    }
+
+    @Test
     void hostedWebSearchUsesResponsesBuiltInDefinition() throws Exception {
         FakeClient client = new FakeClient(textResponse("Searched"));
         Agent agent = new Agent(json, client, List.of(new HostedWebSearchTool()), (tool, arguments) -> false,
@@ -110,7 +122,25 @@ class AgentTest {
         }
     }
 
-    private final class EchoTool implements Tool {
+    private final class ProviderTool implements Tool, DynamicToolProvider {
+        private final Tool dynamic = new EchoTool() {
+             public String name() { return "fresh"; }
+        };
+
+         public String name() { return "dynamic_provider"; }
+         public boolean advertised() { return false; }
+         public String description() { return "Dynamic tool provider"; }
+         public ObjectNode parameters() { return json.createObjectNode().put("type", "object"); }
+         public boolean requiresApproval() { return false; }
+         public String preview(JsonNode arguments) { return "provider"; }
+         public String execute(JsonNode arguments) { return "provider"; }
+         public Tool resolveDynamicTool(String name) {
+            return dynamic.name().equals(name) ? dynamic : null;
+        }
+         public List<Tool> dynamicTools() { return List.of(dynamic); }
+    }
+
+    private class EchoTool implements Tool {
         @Override public String name() { return "echo"; }
         @Override public String description() { return "Echo a value"; }
         @Override public ObjectNode parameters() {

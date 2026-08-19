@@ -17,6 +17,7 @@ The source owners are `fx/src/builtins/mcp.zig`,
 - `initialize` followed by `notifications/initialized`;
 - Streamable HTTP JSON and SSE response bodies, HTTPS-or-loopback URL policy, safe custom headers, session and protocol-version propagation, optional session IDs, and best-effort DELETE teardown;
 - deprecated HTTP+SSE endpoint discovery with same-origin enforcement, exact 2024-11-05 negotiation, POST message routing, custom headers, and stream-only cleanup;
+- Streamable HTTP GET listeners and HTTP+SSE reader notifications that refresh changed tool catalogs without reconnecting, including dynamic search, selection, advertisement, and dispatch;
 - bounded HTTP bodies plus chunked CR, LF, and CRLF SSE parsing that returns on a matching event without waiting for EOF;
 - strict JSON-RPC 2.0 response envelopes and correlated numeric IDs;
 - paginated `tools/list`, deterministic sorting, metadata search, exact selection with next-step schema publication, duplicate tool/cursor
@@ -35,12 +36,12 @@ The source owners are `fx/src/builtins/mcp.zig`,
   deterministic child-process teardown.
 
 The main owners are `McpRuntimeTest`, `McpValidationTest`,
-`McpHealthPolicyTest`, `McpHttpRuntimeTest`, `McpLegacyHttpSseTest`, and
+`McpHealthPolicyTest`, `McpHttpRuntimeTest`, `McpHttpListenerTest`,
+`McpLegacyHttpSseTest`, and
 `MainMcpIntegrationTest`.
 
 ## Remaining MCP work
 
-MCP OAuth/credential storage, Streamable HTTP GET listeners and subscriptions,
-automatic expired-request replay, server elicitation, live reload,
+MCP OAuth/credential storage, resource subscriptions, automatic expired-request replay, server elicitation, live reload,
 and health/status commands remain unimplemented. These are not counted as
 parity yet.

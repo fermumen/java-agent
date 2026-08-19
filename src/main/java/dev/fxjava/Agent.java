@@ -126,7 +126,7 @@ public final class Agent {
         if (callId.isBlank()) throw new IOException("OpenAI returned a function call without call_id");
 
         String result;
-        Tool tool = tools.get(name);
+        Tool tool = resolveTool(name);
         if (tool == null || !tool.advertised()) {
             result = "Error: unknown tool '" + name + "'";
         } else {
@@ -161,13 +161,32 @@ public final class Agent {
         toolOutput.put("output", result);
     }
 
-    private ArrayNode buildToolDefinitions(List<Tool> availableTools) {
+    private Tool resolveTool(String name) throws IOException {
+        Tool fixed = tools.get(name);
+        if (fixed != null) return fixed;
+        for (Tool candidate : toolCatalog) {
+            if (candidate instanceof DynamicToolProvider provider) {
+                Tool dynamic = provider.resolveDynamicTool(name);
+                if (dynamic != null) return dynamic;
+            }
+        }
+        return null;
+    }
+
+    private ArrayNode buildToolDefinitions(List<Tool> availableTools) throws IOException {
         ArrayNode definitions = json.createArrayNode();
+        Set<String> names = new LinkedHashSet<>();
+        for (Tool tool : availableTools) addToolDefinition(definitions, names, tool);
         for (Tool tool : availableTools) {
-            if (!tool.advertised()) continue;
-            definitions.add(tool.definition(json));
+            if (tool instanceof DynamicToolProvider provider) {
+                for (Tool dynamic : provider.dynamicTools()) addToolDefinition(definitions, names, dynamic);
+            }
         }
         return definitions;
+    }
+
+    private void addToolDefinition(ArrayNode definitions, Set<String> names, Tool tool) {
+        if (tool.advertised() && names.add(tool.name())) definitions.add(tool.definition(json));
     }
 
     private void addUserMessage(String content) {
