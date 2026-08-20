@@ -14,8 +14,11 @@ import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Base64;
-import java.util.HexFormat;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -41,6 +44,16 @@ final class SessionImages {
         int[] count = {0};
         transform(sessionDirectory, copy, true, count);
         return copy;
+    }
+
+    static List<String> referencedFiles(JsonNode input) throws IOException {
+        Set<String> references = new LinkedHashSet<>();
+        collectReferences(input, references);
+        return references.stream().sorted().collect(Collectors.toUnmodifiableList());
+    }
+
+    static void verifySidecars(Path sessionDirectory, Iterable<String> filenames) throws IOException {
+        for (String filename : filenames) load(sessionDirectory, filename);
     }
 
     static void deleteSidecars(Path sessionDirectory) throws IOException {
@@ -69,7 +82,8 @@ final class SessionImages {
             for (JsonNode child : node) transform(sessionDirectory, child, hydrate, count);
             return;
         }
-        if (!(node instanceof ObjectNode object)) return;
+        if (!(node instanceof ObjectNode)) return;
+        ObjectNode object = (ObjectNode) node;
         if (object.path("type").asText().equals("input_image") && object.path("image_url").isTextual()) {
             String url = object.path("image_url").asText();
             boolean candidate = hydrate ? url.startsWith(REF_PREFIX) : url.startsWith("data:image/");
@@ -82,6 +96,29 @@ final class SessionImages {
         }
         var fields = object.properties().iterator();
         while (fields.hasNext()) transform(sessionDirectory, fields.next().getValue(), hydrate, count);
+    }
+
+    private static void collectReferences(JsonNode node, Set<String> references) throws IOException {
+        if (node.isArray()) {
+            for (JsonNode child : node) collectReferences(child, references);
+            return;
+        }
+        if (!(node instanceof ObjectNode)) return;
+        ObjectNode object = (ObjectNode) node;
+        if (object.path("type").asText().equals("input_image") && object.path("image_url").isTextual()) {
+            String url = object.path("image_url").asText();
+            if (url.startsWith(REF_PREFIX)) {
+                String filename = url.substring(REF_PREFIX.length());
+                if (!SAFE_FILE.matcher(filename).matches()) {
+                    throw new IOException("Unsafe session image reference: " + filename);
+                }
+                if (references.add(filename) && references.size() > MAX_REFERENCES) {
+                    throw new IOException("Session contains too many image references");
+                }
+            }
+        }
+        var fields = object.properties().iterator();
+        while (fields.hasNext()) collectReferences(fields.next().getValue(), references);
     }
 
     private static String store(Path sessionDirectory, String dataUrl) throws IOException {
@@ -145,18 +182,23 @@ final class SessionImages {
     }
 
     private static String extension(String mediaType) throws IOException {
-        return switch (mediaType) {
-            case "image/png" -> ".png";
-            case "image/jpeg" -> ".jpg";
-            case "image/gif" -> ".gif";
-            case "image/webp" -> ".webp";
-            default -> throw new IOException("Unsupported session image type: " + mediaType);
-        };
+        switch (mediaType) {
+            case "image/png":
+                return ".png";
+            case "image/jpeg":
+                return ".jpg";
+            case "image/gif":
+                return ".gif";
+            case "image/webp":
+                return ".webp";
+            default:
+                throw new IOException("Unsupported session image type: " + mediaType);
+        }
     }
 
     private static String sha256(byte[] bytes) {
         try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+            return Hex.encode(MessageDigest.getInstance("SHA-256").digest(bytes));
         } catch (NoSuchAlgorithmException impossible) {
             throw new IllegalStateException(impossible);
         }

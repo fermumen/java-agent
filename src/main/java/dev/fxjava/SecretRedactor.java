@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
@@ -68,7 +69,7 @@ final class SecretRedactor {
             querySearch = authorityEnd;
         }
         int query = raw.indexOf('?', querySearch);
-        if (query < 0) return output.isEmpty() ? raw : output.append(raw, copied, raw.length()).toString();
+        if (query < 0) return output.length() == 0 ? raw : output.append(raw, copied, raw.length()).toString();
         output.append(raw, copied, query + 1);
         int queryEnd = raw.indexOf('#', query + 1);
         if (queryEnd < 0) queryEnd = raw.length();
@@ -90,8 +91,11 @@ final class SecretRedactor {
     }
 
     private static void redactNode(JsonNode node, String toolName) {
-        if (node instanceof ObjectNode object) {
-            for (String name : List.copyOf(object.propertyStream().map(java.util.Map.Entry::getKey).toList())) {
+        if (node instanceof ObjectNode) {
+            ObjectNode object = (ObjectNode) node;
+            List<String> names = new ArrayList<>();
+            object.fieldNames().forEachRemaining(names::add);
+            for (String name : names) {
                 JsonNode value = object.get(name);
                 if (sensitiveKey(name)) {
                     object.put(name, "[redacted]");
@@ -102,7 +106,8 @@ final class SecretRedactor {
                     redactNode(value, toolName);
                 }
             }
-        } else if (node instanceof ArrayNode array) {
+        } else if (node instanceof ArrayNode) {
+            ArrayNode array = (ArrayNode) node;
             for (int index = 0; index < array.size(); index++) {
                 JsonNode value = array.get(index);
                 if (value.isTextual()) array.set(index, array.textNode(mask(value.asText())));
@@ -249,5 +254,34 @@ final class SecretRedactor {
         return assignmentKeyChar(value) || value == '-' || value == '.';
     }
 
-    private record Span(int prefixEnd, int valueLength) { }
+    private static final class Span {
+        private final int prefixEnd;
+        private final int valueLength;
+
+        private Span(int prefixEnd, int valueLength) {
+            this.prefixEnd = prefixEnd;
+            this.valueLength = valueLength;
+        }
+
+        public int prefixEnd() { return prefixEnd; }
+        public int valueLength() { return valueLength; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof Span)) return false;
+            Span that = (Span) other;
+            return prefixEnd == that.prefixEnd && valueLength == that.valueLength;
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * Integer.hashCode(prefixEnd) + Integer.hashCode(valueLength);
+        }
+
+        @Override
+        public String toString() {
+            return "Span[prefixEnd=" + prefixEnd + ", valueLength=" + valueLength + "]";
+        }
+    }
 }

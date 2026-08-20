@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -29,7 +30,7 @@ class McpRuntimeTest {
             List<Tool> tools = runtime.tools();
             assertEquals(List.of("mcp_search_tools", "mcp_select_tool", "mcp_features",
                             "mcp__fixture__alpha_mutate", "mcp__fixture__zeta_echo"),
-                    tools.stream().map(Tool::name).toList());
+                    tools.stream().map(Tool::name).collect(Collectors.toUnmodifiableList()));
             Tool mutate = tools.stream().filter(tool -> tool.name().equals("mcp__fixture__alpha_mutate")).findFirst().orElseThrow();
             Tool echo = tools.stream().filter(tool -> tool.name().equals("mcp__fixture__zeta_echo")).findFirst().orElseThrow();
             assertTrue(mutate.requiresApproval());
@@ -88,7 +89,8 @@ class McpRuntimeTest {
             writeConfig(config, true, 9_000);
             assertEquals(2, runtime.toolCatalog().size());
             assertEquals(List.of("mcp__fixture__zeta_echo"),
-                    runtime.selectedTools().stream().map(Tool::name).toList());
+                    runtime.selectedTools().stream().map(Tool::name)
+                            .collect(Collectors.toUnmodifiableList()));
             assertFalse(selected.advertised());
 
             writeConfig(config, false, 9_000);

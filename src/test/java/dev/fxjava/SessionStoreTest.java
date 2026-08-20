@@ -2,6 +2,7 @@ package dev.fxjava;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -15,6 +16,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.stream.Collectors;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Executors;
 
@@ -72,6 +74,41 @@ class SessionStoreTest {
     }
 
     @Test
+    void schemaV1LoadsAndRewritesAsSchemaV2WithArtifactManifest() throws Exception {
+        SessionStore.Snapshot created = store.create(workspaceA, "gpt-5.6", "system");
+        Path file = temporary.resolve("state/sessions").resolve(created.id()).resolve("session.json");
+        ObjectNode legacy = (ObjectNode) json.readTree(Files.readString(file));
+        legacy.put("schema_version", 1);
+        legacy.remove("artifacts");
+        Files.writeString(file, json.writeValueAsString(legacy), StandardCharsets.UTF_8);
+
+        SessionStore.Snapshot loaded = store.load(created.id());
+        assertEquals(created, loaded);
+        assertEquals(1, json.readTree(Files.readString(file)).path("schema_version").asInt());
+
+        store.save(loaded);
+        ObjectNode migrated = (ObjectNode) json.readTree(Files.readString(file));
+        assertEquals(2, migrated.path("schema_version").asInt());
+        assertTrue(migrated.path("artifacts").path("images").isArray());
+        assertTrue(migrated.path("artifacts").path("tool_results").isArray());
+        assertEquals(0, migrated.path("artifacts").path("images").size());
+        assertEquals(0, migrated.path("artifacts").path("tool_results").size());
+    }
+
+    @Test
+    void rejectsUnknownFutureSchemaWithoutMutatingIt() throws Exception {
+        SessionStore.Snapshot created = store.create(workspaceA, "gpt-5.6", "system");
+        Path file = temporary.resolve("state/sessions").resolve(created.id()).resolve("session.json");
+        ObjectNode future = (ObjectNode) json.readTree(Files.readString(file));
+        future.put("schema_version", 99);
+        String bytes = json.writeValueAsString(future);
+        Files.writeString(file, bytes, StandardCharsets.UTF_8);
+
+        assertThrows(IOException.class, () -> store.load(created.id()));
+        assertEquals(bytes, Files.readString(file));
+    }
+
+    @Test
     void latestPointersRemainIndependentAcrossWorkspaces() throws Exception {
         SessionStore.Snapshot firstA = store.create(workspaceA, "model-a", "a");
         clock.advance(1_000);
@@ -93,9 +130,11 @@ class SessionStoreTest {
         SessionStore.Snapshot latest = store.create(workspaceA, "two", "system");
 
         assertEquals(List.of(latest.id(), first.id()),
-                store.list(workspaceA, 10).stream().map(SessionStore.Snapshot::id).toList());
+                store.list(workspaceA, 10).stream().map(SessionStore.Snapshot::id)
+                        .collect(Collectors.toList()));
         assertEquals(List.of(latest.id()),
-                store.list(workspaceA, 1).stream().map(SessionStore.Snapshot::id).toList());
+                store.list(workspaceA, 1).stream().map(SessionStore.Snapshot::id)
+                        .collect(Collectors.toList()));
         assertEquals(3, store.list(null, 10).size());
         assertTrue(store.list(null, 10).stream().anyMatch(value -> value.id().equals(other.id())));
     }
@@ -110,7 +149,8 @@ class SessionStoreTest {
 
         assertThrows(IOException.class, () -> store.load(corrupt.id()));
         assertEquals(List.of(valid.id()),
-                store.list(workspaceA, 10).stream().map(SessionStore.Snapshot::id).toList());
+                store.list(workspaceA, 10).stream().map(SessionStore.Snapshot::id)
+                        .collect(Collectors.toList()));
         assertEquals(valid.id(), store.latest(workspaceA).id());
         assertEquals("{broken", Files.readString(corruptFile));
     }

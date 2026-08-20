@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -15,6 +16,8 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
 /** Compact installed-skill discovery and bounded reader derived from fx's skill contract. */
 final class SkillTool implements Tool {
@@ -100,12 +103,26 @@ final class SkillTool implements Tool {
         int wanted = (int) Math.min(MAX_CHUNK_BYTES, size - offset);
         byte[] bytes;
         try (InputStream input = Files.newInputStream(canonical)) {
-            input.skipNBytes(offset);
+            skipFully(input, offset);
             bytes = input.readNBytes(wanted);
         }
         int end = offset + bytes.length;
         String content = new String(bytes, StandardCharsets.UTF_8);
         return content + (end < size ? "\n[next_offset=" + end + "]" : "\n[end]");
+    }
+
+    private static void skipFully(InputStream input, long byteCount) throws IOException {
+        long remaining = byteCount;
+        while (remaining > 0) {
+            long skipped = input.skip(remaining);
+            if (skipped > 0) {
+                remaining -= skipped;
+            } else if (input.read() < 0) {
+                throw new EOFException("Unexpected end of skill resource");
+            } else {
+                remaining--;
+            }
+        }
     }
 
     private static Map<String, Skill> discover(Path workspace, Path stateRoot) throws IOException {
@@ -142,7 +159,7 @@ final class SkillTool implements Tool {
     private static void discoverRoot(Path root, LinkedHashMap<String, Skill> result) throws IOException {
         if (!Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(root)) return;
         try (var children = Files.list(root)) {
-            for (Path child : children.sorted().toList()) {
+            for (Path child : children.sorted().collect(Collectors.toList())) {
                 if (!Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(child)) continue;
                 Path file = child.resolve("SKILL.md");
                 if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(file)) continue;
@@ -184,5 +201,42 @@ final class SkillTool implements Tool {
         return value.asInt();
     }
 
-    record Skill(String name, String description, Path directory) { }
+    static final class Skill {
+        private final String name;
+        private final String description;
+        private final Path directory;
+
+        Skill(String name, String description, Path directory) {
+            this.name = name;
+            this.description = description;
+            this.directory = directory;
+        }
+
+        public String name() { return name; }
+        public String description() { return description; }
+        public Path directory() { return directory; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof Skill)) return false;
+            Skill that = (Skill) other;
+            return Objects.equals(name, that.name)
+                    && Objects.equals(description, that.description)
+                    && Objects.equals(directory, that.directory);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(name);
+            result = 31 * result + Objects.hashCode(description);
+            result = 31 * result + Objects.hashCode(directory);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "Skill[name=" + name + ", description=" + description + ", directory=" + directory + "]";
+        }
+    }
 }

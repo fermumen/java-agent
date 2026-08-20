@@ -22,6 +22,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
@@ -61,15 +62,21 @@ final class TerminalMonitors {
         exact(operation, Set.of("kind", "monitor_id", "definition"));
         String kind = text(operation, "kind");
         if (!OPERATIONS.contains(kind)) throw invalid("InvalidMonitor");
-        return switch (kind) {
-            case "add" -> add(TerminalMonitorDefinition.parse(required(operation, "definition")));
-            case "update" -> update(text(operation, "monitor_id"),
-                    TerminalMonitorDefinition.parse(required(operation, "definition")));
-            case "pause" -> state(text(operation, "monitor_id"), true);
-            case "resume" -> state(text(operation, "monitor_id"), false);
-            case "remove" -> remove(text(operation, "monitor_id"));
-            default -> throw invalid("InvalidMonitor");
-        };
+        switch (kind) {
+            case "add":
+                return add(TerminalMonitorDefinition.parse(required(operation, "definition")));
+            case "update":
+                return update(text(operation, "monitor_id"),
+                        TerminalMonitorDefinition.parse(required(operation, "definition")));
+            case "pause":
+                return state(text(operation, "monitor_id"), true);
+            case "resume":
+                return state(text(operation, "monitor_id"), false);
+            case "remove":
+                return remove(text(operation, "monitor_id"));
+            default:
+                throw invalid("InvalidMonitor");
+        }
     }
 
     synchronized void refresh(Observation observation) {
@@ -179,49 +186,77 @@ final class TerminalMonitors {
 
     private boolean shouldNotify(Entry entry, boolean matched, boolean transition, boolean exited, long now) {
         TerminalMonitorDefinition.Notify schedule = entry.definition.notification();
-        return switch (schedule.kind()) {
-            case "on_match" -> matched && !entry.matched;
-            case "on_state_change" -> transition;
-            case "on_exit" -> exited;
-            case "every_check" -> true;
-            case "every_n_checks" -> entry.checkCount % schedule.value() == 0;
-            case "interval" -> {
+        switch (schedule.kind()) {
+            case "on_match":
+                return matched && !entry.matched;
+            case "on_state_change":
+                return transition;
+            case "on_exit":
+                return exited;
+            case "every_check":
+                return true;
+            case "every_n_checks":
+                return entry.checkCount % schedule.value() == 0;
+            case "interval":
                 boolean due = now - entry.lastNotificationMs >= schedule.value();
                 if (due) entry.lastNotificationMs = now;
-                yield due;
-            }
-            default -> false;
-        };
+                return due;
+            default:
+                return false;
+        }
     }
 
     private boolean matches(Entry entry, Observation observation) throws Exception {
         TerminalMonitorDefinition.Condition condition = entry.definition.condition();
-        return switch (condition.kind()) {
-            case "process_exit" -> observation.exited();
-            case "exit_code" -> observation.exitCode() != null && observation.exitCode().longValue() == condition.number();
-            case "signal" -> condition.text().equals(observation.signal());
-            case "output_contains" -> observation.output().contains(condition.text());
-            case "output_matches", "screen_matches" -> glob(condition.text()).matcher(observation.output()).find();
-            case "output_quiet" -> System.nanoTime() - observation.lastOutputNanos()
-                    >= TimeUnit.MILLISECONDS.toNanos(condition.number());
-            case "tcp_ready" -> tcpReady(condition.text(), condition.port());
-            case "http_ready" -> httpReady(condition.text());
-            case "path_exists" -> Files.exists(path(condition.text()), LinkOption.NOFOLLOW_LINKS);
-            case "path_changed" -> changed(entry, path(condition.text()));
-            case "path_size" -> Files.exists(path(condition.text()), LinkOption.NOFOLLOW_LINKS)
-                    && Files.size(path(condition.text())) >= condition.number();
-            case "custom_probe" -> customProbe(condition.text(), condition.secondary());
-            default -> false;
-        };
+        switch (condition.kind()) {
+            case "process_exit":
+                return observation.exited();
+            case "exit_code":
+                return observation.exitCode() != null
+                        && observation.exitCode().longValue() == condition.number();
+            case "signal":
+                return condition.text().equals(observation.signal());
+            case "output_contains":
+                return observation.output().contains(condition.text());
+            case "output_matches":
+            case "screen_matches":
+                return glob(condition.text()).matcher(observation.output()).find();
+            case "output_quiet":
+                return System.nanoTime() - observation.lastOutputNanos()
+                        >= TimeUnit.MILLISECONDS.toNanos(condition.number());
+            case "tcp_ready":
+                return tcpReady(condition.text(), condition.port());
+            case "http_ready":
+                return httpReady(condition.text());
+            case "path_exists":
+                return Files.exists(path(condition.text()), LinkOption.NOFOLLOW_LINKS);
+            case "path_changed":
+                return changed(entry, path(condition.text()));
+            case "path_size":
+                return Files.exists(path(condition.text()), LinkOption.NOFOLLOW_LINKS)
+                        && Files.size(path(condition.text())) >= condition.number();
+            case "custom_probe":
+                return customProbe(condition.text(), condition.secondary());
+            default:
+                return false;
+        }
     }
 
     private void initializeBaseline(Entry entry) throws IOException {
         TerminalMonitorDefinition.Condition condition = entry.definition.condition();
         switch (condition.kind()) {
-            case "path_exists", "path_size" -> path(condition.text());
-            case "path_changed" -> entry.pathBaseline = fileState(path(condition.text()));
-            case "custom_probe" -> workspace.resolveInsideExisting(condition.secondary());
-            default -> { }
+            case "path_exists":
+            case "path_size":
+                path(condition.text());
+                break;
+            case "path_changed":
+                entry.pathBaseline = fileState(path(condition.text()));
+                break;
+            case "custom_probe":
+                workspace.resolveInsideExisting(condition.secondary());
+                break;
+            default:
+                break;
         }
     }
 
@@ -316,9 +351,130 @@ final class TerminalMonitors {
         return new IllegalArgumentException("terminal monitor arguments are invalid: " + reason);
     }
 
-    record Observation(String output, boolean exited, Integer exitCode, String signal, long lastOutputNanos) { }
-    private record Event(long id, String monitorId, String reason, long createdAtMs) { }
-    private record FileState(boolean exists, long size, long modifiedMs) { }
+    static final class Observation {
+        private final String output;
+        private final boolean exited;
+        private final Integer exitCode;
+        private final String signal;
+        private final long lastOutputNanos;
+
+        Observation(String output, boolean exited, Integer exitCode, String signal, long lastOutputNanos) {
+            this.output = output;
+            this.exited = exited;
+            this.exitCode = exitCode;
+            this.signal = signal;
+            this.lastOutputNanos = lastOutputNanos;
+        }
+
+        public String output() { return output; }
+        public boolean exited() { return exited; }
+        public Integer exitCode() { return exitCode; }
+        public String signal() { return signal; }
+        public long lastOutputNanos() { return lastOutputNanos; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof Observation)) return false;
+            Observation that = (Observation) other;
+            return exited == that.exited && lastOutputNanos == that.lastOutputNanos
+                    && Objects.equals(output, that.output) && Objects.equals(exitCode, that.exitCode)
+                    && Objects.equals(signal, that.signal);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(output);
+            result = 31 * result + Boolean.hashCode(exited);
+            result = 31 * result + Objects.hashCode(exitCode);
+            result = 31 * result + Objects.hashCode(signal);
+            return 31 * result + Long.hashCode(lastOutputNanos);
+        }
+
+        @Override
+        public String toString() {
+            return "Observation[output=" + output + ", exited=" + exited + ", exitCode=" + exitCode
+                    + ", signal=" + signal + ", lastOutputNanos=" + lastOutputNanos + "]";
+        }
+    }
+
+    private static final class Event {
+        private final long id;
+        private final String monitorId;
+        private final String reason;
+        private final long createdAtMs;
+
+        Event(long id, String monitorId, String reason, long createdAtMs) {
+            this.id = id;
+            this.monitorId = monitorId;
+            this.reason = reason;
+            this.createdAtMs = createdAtMs;
+        }
+
+        public long id() { return id; }
+        public String monitorId() { return monitorId; }
+        public String reason() { return reason; }
+        public long createdAtMs() { return createdAtMs; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof Event)) return false;
+            Event that = (Event) other;
+            return id == that.id && createdAtMs == that.createdAtMs
+                    && Objects.equals(monitorId, that.monitorId) && Objects.equals(reason, that.reason);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Long.hashCode(id);
+            result = 31 * result + Objects.hashCode(monitorId);
+            result = 31 * result + Objects.hashCode(reason);
+            return 31 * result + Long.hashCode(createdAtMs);
+        }
+
+        @Override
+        public String toString() {
+            return "Event[id=" + id + ", monitorId=" + monitorId + ", reason=" + reason
+                    + ", createdAtMs=" + createdAtMs + "]";
+        }
+    }
+
+    private static final class FileState {
+        private final boolean exists;
+        private final long size;
+        private final long modifiedMs;
+
+        FileState(boolean exists, long size, long modifiedMs) {
+            this.exists = exists;
+            this.size = size;
+            this.modifiedMs = modifiedMs;
+        }
+
+        public boolean exists() { return exists; }
+        public long size() { return size; }
+        public long modifiedMs() { return modifiedMs; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof FileState)) return false;
+            FileState that = (FileState) other;
+            return exists == that.exists && size == that.size && modifiedMs == that.modifiedMs;
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Boolean.hashCode(exists);
+            result = 31 * result + Long.hashCode(size);
+            return 31 * result + Long.hashCode(modifiedMs);
+        }
+
+        @Override
+        public String toString() {
+            return "FileState[exists=" + exists + ", size=" + size + ", modifiedMs=" + modifiedMs + "]";
+        }
+    }
 
     private static final class Entry {
         final String id;

@@ -19,6 +19,7 @@ import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 
 /** Bounded direct public-HTTP fetcher; it never uses Gateway. */
 final class WebFetchTool implements Tool {
@@ -212,7 +213,89 @@ final class WebFetchTool implements Tool {
         }
     }
 
-    private record Result(String submittedUrl, String finalUrl, int status, String mime,
-                          String content, boolean truncated) { }
-    private record Cached(Result result, long expiresAtMs) { }
+    private static final class Result {
+        private final String submittedUrl;
+        private final String finalUrl;
+        private final int status;
+        private final String mime;
+        private final String content;
+        private final boolean truncated;
+
+        private Result(String submittedUrl, String finalUrl, int status, String mime,
+                       String content, boolean truncated) {
+            this.submittedUrl = submittedUrl;
+            this.finalUrl = finalUrl;
+            this.status = status;
+            this.mime = mime;
+            this.content = content;
+            this.truncated = truncated;
+        }
+
+        public String submittedUrl() { return submittedUrl; }
+        public String finalUrl() { return finalUrl; }
+        public int status() { return status; }
+        public String mime() { return mime; }
+        public String content() { return content; }
+        public boolean truncated() { return truncated; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof Result)) return false;
+            Result that = (Result) other;
+            return status == that.status && truncated == that.truncated
+                    && Objects.equals(submittedUrl, that.submittedUrl)
+                    && Objects.equals(finalUrl, that.finalUrl)
+                    && Objects.equals(mime, that.mime)
+                    && Objects.equals(content, that.content);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(submittedUrl);
+            result = 31 * result + Objects.hashCode(finalUrl);
+            result = 31 * result + Integer.hashCode(status);
+            result = 31 * result + Objects.hashCode(mime);
+            result = 31 * result + Objects.hashCode(content);
+            result = 31 * result + Boolean.hashCode(truncated);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "Result[submittedUrl=" + submittedUrl + ", finalUrl=" + finalUrl + ", status=" + status
+                    + ", mime=" + mime + ", content=" + content + ", truncated=" + truncated + "]";
+        }
+    }
+
+    private static final class Cached {
+        private final Result result;
+        private final long expiresAtMs;
+
+        private Cached(Result result, long expiresAtMs) {
+            this.result = result;
+            this.expiresAtMs = expiresAtMs;
+        }
+
+        public Result result() { return result; }
+        public long expiresAtMs() { return expiresAtMs; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof Cached)) return false;
+            Cached that = (Cached) other;
+            return expiresAtMs == that.expiresAtMs && Objects.equals(result, that.result);
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * Objects.hashCode(result) + Long.hashCode(expiresAtMs);
+        }
+
+        @Override
+        public String toString() {
+            return "Cached[result=" + result + ", expiresAtMs=" + expiresAtMs + "]";
+        }
+    }
 }

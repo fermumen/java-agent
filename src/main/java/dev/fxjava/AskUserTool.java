@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Set;
 
 /** Interactive-only FX-compatible multiple-choice clarification tool. */
@@ -124,6 +125,65 @@ final class AskUserTool implements Tool {
         return value.toString();
     }
 
-    private record Question(String text, List<Option> options) { }
-    private record Option(String label, String description) { }
+    private static final class Question {
+        private final String text;
+        private final List<Option> options;
+
+        private Question(String text, List<Option> options) {
+            this.text = text;
+            this.options = options;
+        }
+
+        public String text() { return text; }
+        public List<Option> options() { return options; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof Question)) return false;
+            Question that = (Question) other;
+            return Objects.equals(text, that.text) && Objects.equals(options, that.options);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(text);
+            result = 31 * result + Objects.hashCode(options);
+            return result;
+        }
+
+        @Override
+        public String toString() { return "Question[text=" + text + ", options=" + options + "]"; }
+    }
+
+    private static final class Option {
+        private final String label;
+        private final String description;
+
+        private Option(String label, String description) {
+            this.label = label;
+            this.description = description;
+        }
+
+        public String label() { return label; }
+        public String description() { return description; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof Option)) return false;
+            Option that = (Option) other;
+            return Objects.equals(label, that.label) && Objects.equals(description, that.description);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(label);
+            result = 31 * result + Objects.hashCode(description);
+            return result;
+        }
+
+        @Override
+        public String toString() { return "Option[label=" + label + ", description=" + description + "]"; }
+    }
 }

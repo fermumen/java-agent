@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.Map;
+import java.util.Objects;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.function.Consumer;
@@ -181,7 +182,8 @@ public final class Agent {
         Tool fixed = tools.get(name);
         if (fixed != null) return fixed;
         for (Tool candidate : toolCatalog) {
-            if (candidate instanceof DynamicToolProvider provider) {
+            if (candidate instanceof DynamicToolProvider) {
+                DynamicToolProvider provider = (DynamicToolProvider) candidate;
                 Tool dynamic = provider.resolveDynamicTool(name);
                 if (dynamic != null) return dynamic;
             }
@@ -194,7 +196,8 @@ public final class Agent {
         Set<String> names = new LinkedHashSet<>();
         for (Tool tool : availableTools) addToolDefinition(definitions, names, tool);
         for (Tool tool : availableTools) {
-            if (tool instanceof DynamicToolProvider provider) {
+            if (tool instanceof DynamicToolProvider) {
+                DynamicToolProvider provider = (DynamicToolProvider) tool;
                 for (Tool dynamic : provider.dynamicTools()) addToolDefinition(definitions, names, dynamic);
             }
         }
@@ -213,8 +216,10 @@ public final class Agent {
 
     private JsonNode persistable(JsonNode item) {
         JsonNode copy = item.deepCopy();
-        if (copy instanceof ObjectNode object && object.path("type").asText().equals("function_call")
-                && object.path("arguments").isTextual()) {
+        if (copy instanceof ObjectNode
+                && copy.path("type").asText().equals("function_call")
+                && copy.path("arguments").isTextual()) {
+            ObjectNode object = (ObjectNode) copy;
             object.put("arguments", SecretRedactor.arguments(json, object.path("name").asText(),
                     object.path("arguments").asText()));
         }
@@ -237,38 +242,135 @@ public final class Agent {
     }
 
     public static String defaultSystemPrompt(AgentConfig config) {
-        return """
-                You are a coding agent working in a local repository. Work autonomously toward the user's request.
-                Inspect relevant files before changing them. Keep edits focused, preserve existing work, and verify changes.
-                Use the provided tools instead of inventing file contents or command results. Never claim to have run a
-                command you did not run. File tools are constrained to the workspace. Destructive or command actions may
-                require approval. If a tool fails, reason from the error and choose a safe alternative.
-
-                Workspace: %s
-                Permission mode: %s
-                Current date: %s
-                """.formatted(config.workspace(), config.permissionMode().name().toLowerCase(java.util.Locale.ROOT), LocalDate.now());
+        return String.format(
+                "You are a coding agent working in a local repository. Work autonomously toward the user's request.\n"
+                        + "Inspect relevant files before changing them. Keep edits focused, preserve existing work, and verify changes.\n"
+                        + "Use the provided tools instead of inventing file contents or command results. Never claim to have run a\n"
+                        + "command you did not run. File tools are constrained to the workspace. Destructive or command actions may\n"
+                        + "require approval. If a tool fails, reason from the error and choose a safe alternative.\n"
+                        + "\n"
+                        + "Workspace: %s\n"
+                        + "Permission mode: %s\n"
+                        + "Current date: %s\n",
+                config.workspace(), config.permissionMode().name().toLowerCase(java.util.Locale.ROOT), LocalDate.now());
     }
 
     void setToolResultSession(String sessionId) {
         if (resultStore != null) resultStore.setSession(sessionId);
     }
 
-    public record ToolCallRecord(String name, String status) { }
+    public static final class ToolCallRecord {
+        private final String name;
+        private final String status;
+
+        public ToolCallRecord(String name, String status) {
+            this.name = name;
+            this.status = status;
+        }
+
+        public String name() { return name; }
+        public String status() { return status; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof ToolCallRecord)) return false;
+            ToolCallRecord that = (ToolCallRecord) other;
+            return Objects.equals(name, that.name) && Objects.equals(status, that.status);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(name);
+            result = 31 * result + Objects.hashCode(status);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "ToolCallRecord[name=" + name + ", status=" + status + "]";
+        }
+    }
 
     interface ParentContext {
         PreparedParentContext prepare() throws IOException;
         void acknowledge(PreparedParentContext prepared) throws IOException;
     }
 
-    record PreparedParentContext(String content, List<ParentDeliveryAck> acknowledgements) {
-        PreparedParentContext {
-            content = content == null ? "" : content;
-            acknowledgements = List.copyOf(acknowledgements);
+    static final class PreparedParentContext {
+        private final String content;
+        private final List<ParentDeliveryAck> acknowledgements;
+
+        PreparedParentContext(String content, List<ParentDeliveryAck> acknowledgements) {
+            this.content = content == null ? "" : content;
+            this.acknowledgements = List.copyOf(acknowledgements);
+        }
+
+        public String content() { return content; }
+        public List<ParentDeliveryAck> acknowledgements() { return acknowledgements; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof PreparedParentContext)) return false;
+            PreparedParentContext that = (PreparedParentContext) other;
+            return Objects.equals(content, that.content)
+                    && Objects.equals(acknowledgements, that.acknowledgements);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(content);
+            result = 31 * result + Objects.hashCode(acknowledgements);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "PreparedParentContext[content=" + content + ", acknowledgements="
+                    + acknowledgements + "]";
         }
     }
 
-    record ParentDeliveryAck(String childId, String targetParentId, long throughSequence) { }
+    static final class ParentDeliveryAck {
+        private final String childId;
+        private final String targetParentId;
+        private final long throughSequence;
+
+        ParentDeliveryAck(String childId, String targetParentId, long throughSequence) {
+            this.childId = childId;
+            this.targetParentId = targetParentId;
+            this.throughSequence = throughSequence;
+        }
+
+        public String childId() { return childId; }
+        public String targetParentId() { return targetParentId; }
+        public long throughSequence() { return throughSequence; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof ParentDeliveryAck)) return false;
+            ParentDeliveryAck that = (ParentDeliveryAck) other;
+            return throughSequence == that.throughSequence
+                    && Objects.equals(childId, that.childId)
+                    && Objects.equals(targetParentId, that.targetParentId);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(childId);
+            result = 31 * result + Objects.hashCode(targetParentId);
+            result = 31 * result + Long.hashCode(throughSequence);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "ParentDeliveryAck[childId=" + childId + ", targetParentId=" + targetParentId
+                    + ", throughSequence=" + throughSequence + "]";
+        }
+    }
 
     private static String safeMessage(Exception error) {
         String message = error.getMessage();

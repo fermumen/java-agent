@@ -208,21 +208,28 @@ class FxFilesystemParityTest {
     }
 
     private ObjectNode validArguments(String tool) {
-        return switch (tool) {
-            case "delete_file", "file_info" -> args("path", "missing");
-            case "rename_file" -> args("old_path", "missing", "new_path", "new");
-            case "copy_file" -> args("source", "missing", "destination", "new");
-            case "create_folder" -> args("path", "new");
-            case "semantic_search" -> args("query", "needle");
-            default -> throw new IllegalArgumentException(tool);
-        };
+        switch (tool) {
+            case "delete_file":
+            case "file_info":
+                return args("path", "missing");
+            case "rename_file":
+                return args("old_path", "missing", "new_path", "new");
+            case "copy_file":
+                return args("source", "missing", "destination", "new");
+            case "create_folder":
+                return args("path", "new");
+            case "semantic_search":
+                return args("query", "needle");
+            default:
+                throw new IllegalArgumentException(tool);
+        }
     }
 
     private ObjectNode args(Object... fields) {
         ObjectNode result = json.createObjectNode();
         for (int index = 0; index < fields.length; index += 2) {
             Object value = fields[index + 1];
-            if (value instanceof Integer number) result.put((String) fields[index], number);
+            if (value instanceof Integer) result.put((String) fields[index], (Integer) value);
             else result.put((String) fields[index], (String) value);
         }
         return result;

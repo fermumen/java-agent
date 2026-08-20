@@ -16,6 +16,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
@@ -341,15 +342,15 @@ final class SubagentManager implements AutoCloseable {
         }
         String result;
         try {
-            result = switch (command.branch()) {
-                case "create" -> create(operationId, command.value());
-                case "inspect" -> inspect(operationId, command.value());
-                case "message" -> message(operationId, command.value(), actorId);
-                case "relationship" -> relationship(operationId, command.value());
-                case "configure" -> configure(operationId, command.value());
-                case "lifecycle" -> lifecycle(operationId, command.value());
-                default -> failure(operationId, null, "invalid_branch_selection", false);
-            };
+            switch (command.branch()) {
+                case "create": result = create(operationId, command.value()); break;
+                case "inspect": result = inspect(operationId, command.value()); break;
+                case "message": result = message(operationId, command.value(), actorId); break;
+                case "relationship": result = relationship(operationId, command.value()); break;
+                case "configure": result = configure(operationId, command.value()); break;
+                case "lifecycle": result = lifecycle(operationId, command.value()); break;
+                default: result = failure(operationId, null, "invalid_branch_selection", false); break;
+            }
         } catch (SubagentFailure failure) {
             result = failure(operationId, failure.childId, failure.code, failure.retryable);
         }
@@ -377,7 +378,7 @@ final class SubagentManager implements AutoCloseable {
             MessageDigest hash = MessageDigest.getInstance("SHA-256");
             hash.update(command.branch().getBytes(StandardCharsets.UTF_8));
             hashNode(hash, command.value());
-            return java.util.HexFormat.of().formatHex(hash.digest());
+            return Hex.encode(hash.digest());
         } catch (NoSuchAlgorithmException impossible) {
             throw new IllegalStateException(impossible);
         }
@@ -449,17 +450,29 @@ final class SubagentManager implements AutoCloseable {
         synchronized (child) {
             for (JsonNode sectionNode : sections) {
                 switch (sectionNode.asText()) {
-                    case "status" -> requested.set("status", status(child));
-                    case "messages" -> {
+                    case "status":
+                        requested.set("status", status(child));
+                        break;
+                    case "messages": {
                         MessagePage page = messages(child, value);
                         requested.set("messages", page.values());
                         nextCursor = page.nextCursor();
+                        break;
                     }
-                    case "tool_activity" -> requested.set("tool_activity", child.toolActivity.deepCopy());
-                    case "events" -> requested.set("events", child.events.deepCopy());
-                    case "configuration" -> requested.set("configuration", configuration(child));
-                    case "relationship" -> requested.set("relationship", relationship(child));
-                    default -> { }
+                    case "tool_activity":
+                        requested.set("tool_activity", child.toolActivity.deepCopy());
+                        break;
+                    case "events":
+                        requested.set("events", child.events.deepCopy());
+                        break;
+                    case "configuration":
+                        requested.set("configuration", configuration(child));
+                        break;
+                    case "relationship":
+                        requested.set("relationship", relationship(child));
+                        break;
+                    default:
+                        break;
                 }
             }
         }
@@ -550,13 +563,14 @@ final class SubagentManager implements AutoCloseable {
             }
             String action = value.path("action").asText();
             switch (action) {
-                case "detach" -> {
+                case "detach": {
                     if (child.parentId == null) {
                         throw new SubagentFailure(child.id, "relationship_missing_parent", false);
                     }
                     child.parentId = null;
+                    break;
                 }
-                case "attach" -> {
+                case "attach": {
                     if (child.parentId != null) {
                         throw new SubagentFailure(child.id, "relationship_already_parented", false);
                     }
@@ -566,8 +580,9 @@ final class SubagentManager implements AutoCloseable {
                         throw new SubagentFailure(child.id, "relationship_cycle", false);
                     }
                     child.parentId = parent;
+                    break;
                 }
-                case "reparent" -> {
+                case "reparent": {
                     if (child.parentId == null) {
                         throw new SubagentFailure(child.id, "relationship_missing_parent", false);
                     }
@@ -577,8 +592,10 @@ final class SubagentManager implements AutoCloseable {
                         throw new SubagentFailure(child.id, "relationship_cycle", false);
                     }
                     child.parentId = parent;
+                    break;
                 }
-                default -> throw new SubagentFailure(child.id, "invalid_relationship", false);
+                default:
+                    throw new SubagentFailure(child.id, "invalid_relationship", false);
             }
             changed(child, "relationship_changed");
         }
@@ -591,7 +608,7 @@ final class SubagentManager implements AutoCloseable {
         boolean cancelled = false;
         synchronized (child) {
             switch (action) {
-                case "cancel" -> {
+                case "cancel": {
                     if (!Set.of("queued", "running", "interrupted").contains(child.state)) {
                         throw new SubagentFailure(child.id, "invalid_lifecycle_transition", false);
                     }
@@ -600,26 +617,31 @@ final class SubagentManager implements AutoCloseable {
                     child.notificationWorkState = "cancelled";
                     child.currentPrompt = null;
                     cancelled = true;
+                    break;
                 }
-                case "resume" -> {
+                case "resume": {
                     if (!child.state.equals("interrupted")) {
                         throw new SubagentFailure(child.id, "invalid_lifecycle_transition", false);
                     }
                     child.state = child.queue.isEmpty() ? "idle" : "queued";
                     if (!child.queue.isEmpty()) submitNext(child);
+                    break;
                 }
-                case "close" -> {
+                case "close": {
                     if (child.state.equals("archived")) throw new SubagentFailure(child.id, "invalid_lifecycle_transition", false);
                     child.archivedFrom = child.state;
                     if (child.future != null) child.future.cancel(true);
                     child.state = "archived";
+                    break;
                 }
-                case "reopen" -> {
+                case "reopen": {
                     if (!child.state.equals("archived")) throw new SubagentFailure(child.id, "invalid_lifecycle_transition", false);
                     child.state = child.queue.isEmpty() ? terminalOrIdle(child.archivedFrom) : "queued";
                     if (!child.queue.isEmpty()) submitNext(child);
+                    break;
                 }
-                default -> throw new SubagentFailure(child.id, "invalid_lifecycle_transition", false);
+                default:
+                    throw new SubagentFailure(child.id, "invalid_lifecycle_transition", false);
             }
             changed(child, action);
             if (cancelled) notifyTerminal(child, "cancelled");
@@ -852,7 +874,7 @@ final class SubagentManager implements AutoCloseable {
 
     private static String digest(String value) {
         try {
-            return java.util.HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+            return Hex.encode(MessageDigest.getInstance("SHA-256")
                     .digest(value.getBytes(StandardCharsets.UTF_8)));
         } catch (NoSuchAlgorithmException impossible) {
             throw new IllegalStateException(impossible);
@@ -874,10 +896,157 @@ final class SubagentManager implements AutoCloseable {
         default void restore(ObjectNode snapshot) throws Exception { }
     }
     interface ChildFactory { ChildRunner create(ChildConfiguration configuration) throws Exception; }
-    record ChildConfiguration(String id, String name, String model, String effort, PermissionMode permissionMode) { }
-    private record Message(String role, String content, long createdAtMs) { }
-    private record MessagePage(ArrayNode values, String nextCursor) { }
-    private record OperationReplay(String fingerprint, String receipt) { }
+    static final class ChildConfiguration {
+        private final String id;
+        private final String name;
+        private final String model;
+        private final String effort;
+        private final PermissionMode permissionMode;
+
+        ChildConfiguration(String id, String name, String model, String effort, PermissionMode permissionMode) {
+            this.id = id;
+            this.name = name;
+            this.model = model;
+            this.effort = effort;
+            this.permissionMode = permissionMode;
+        }
+
+        public String id() { return id; }
+        public String name() { return name; }
+        public String model() { return model; }
+        public String effort() { return effort; }
+        public PermissionMode permissionMode() { return permissionMode; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof ChildConfiguration)) return false;
+            ChildConfiguration that = (ChildConfiguration) other;
+            return Objects.equals(id, that.id) && Objects.equals(name, that.name)
+                    && Objects.equals(model, that.model) && Objects.equals(effort, that.effort)
+                    && permissionMode == that.permissionMode;
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(id);
+            result = 31 * result + Objects.hashCode(name);
+            result = 31 * result + Objects.hashCode(model);
+            result = 31 * result + Objects.hashCode(effort);
+            result = 31 * result + Objects.hashCode(permissionMode);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "ChildConfiguration[id=" + id + ", name=" + name + ", model=" + model
+                    + ", effort=" + effort + ", permissionMode=" + permissionMode + "]";
+        }
+    }
+
+    private static final class Message {
+        private final String role;
+        private final String content;
+        private final long createdAtMs;
+
+        private Message(String role, String content, long createdAtMs) {
+            this.role = role;
+            this.content = content;
+            this.createdAtMs = createdAtMs;
+        }
+
+        public String role() { return role; }
+        public String content() { return content; }
+        public long createdAtMs() { return createdAtMs; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof Message)) return false;
+            Message that = (Message) other;
+            return createdAtMs == that.createdAtMs && Objects.equals(role, that.role)
+                    && Objects.equals(content, that.content);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(role);
+            result = 31 * result + Objects.hashCode(content);
+            result = 31 * result + Long.hashCode(createdAtMs);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "Message[role=" + role + ", content=" + content + ", createdAtMs=" + createdAtMs + "]";
+        }
+    }
+
+    private static final class MessagePage {
+        private final ArrayNode values;
+        private final String nextCursor;
+
+        private MessagePage(ArrayNode values, String nextCursor) {
+            this.values = values;
+            this.nextCursor = nextCursor;
+        }
+
+        public ArrayNode values() { return values; }
+        public String nextCursor() { return nextCursor; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof MessagePage)) return false;
+            MessagePage that = (MessagePage) other;
+            return Objects.equals(values, that.values) && Objects.equals(nextCursor, that.nextCursor);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(values);
+            result = 31 * result + Objects.hashCode(nextCursor);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "MessagePage[values=" + values + ", nextCursor=" + nextCursor + "]";
+        }
+    }
+
+    private static final class OperationReplay {
+        private final String fingerprint;
+        private final String receipt;
+
+        private OperationReplay(String fingerprint, String receipt) {
+            this.fingerprint = fingerprint;
+            this.receipt = receipt;
+        }
+
+        public String fingerprint() { return fingerprint; }
+        public String receipt() { return receipt; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof OperationReplay)) return false;
+            OperationReplay that = (OperationReplay) other;
+            return Objects.equals(fingerprint, that.fingerprint) && Objects.equals(receipt, that.receipt);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(fingerprint);
+            result = 31 * result + Objects.hashCode(receipt);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "OperationReplay[fingerprint=" + fingerprint + ", receipt=" + receipt + "]";
+        }
+    }
 
     private final class Child {
         final String id;

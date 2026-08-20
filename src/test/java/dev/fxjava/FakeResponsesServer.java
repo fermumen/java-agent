@@ -9,18 +9,16 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicInteger;
 
 final class FakeResponsesServer implements AutoCloseable {
-    private static final String TOOL_RESPONSE = """
-            {"id":"resp_1","object":"response","status":"completed","output":[
-              {"id":"rs_1","type":"reasoning","encrypted_content":"encrypted-state","summary":[]},
-              {"id":"fc_1","type":"function_call","call_id":"call-smoke","name":"write_file",
-               "arguments":"{\\\"path\\\":\\\"smoke.txt\\\",\\\"content\\\":\\\"created by responses smoke test\\\\n\\\"}",
-               "status":"completed"}]}
-            """;
-    private static final String FINAL_RESPONSE = """
-            {"id":"resp_2","object":"response","status":"completed","output":[
-              {"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[
-                {"type":"output_text","text":"Responses smoke test complete","annotations":[]}]}]}
-            """;
+    private static final String TOOL_RESPONSE =
+            "{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"output\":[\n"
+            + "  {\"id\":\"rs_1\",\"type\":\"reasoning\",\"encrypted_content\":\"encrypted-state\",\"summary\":[]},\n"
+            + "  {\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call-smoke\",\"name\":\"write_file\",\n"
+            + "   \"arguments\":\"{\\\"path\\\":\\\"smoke.txt\\\",\\\"content\\\":\\\"created by responses smoke test\\\\n\\\"}\",\n"
+            + "   \"status\":\"completed\"}]}\n";
+    private static final String FINAL_RESPONSE =
+            "{\"id\":\"resp_2\",\"object\":\"response\",\"status\":\"completed\",\"output\":[\n"
+            + "  {\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[\n"
+            + "    {\"type\":\"output_text\",\"text\":\"Responses smoke test complete\",\"annotations\":[]}]}]}\n";
 
     private final HttpServer server;
     private final AtomicInteger requests = new AtomicInteger();

@@ -102,7 +102,7 @@ public final class OpenAiResponsesClient implements ResponsesClient {
                 if (terminal != null) completed = terminal;
                 data.setLength(0);
             } else if (line.startsWith("data:")) {
-                if (!data.isEmpty()) data.append('\n');
+                if (data.length() > 0) data.append('\n');
                 String value = line.substring(5);
                 data.append(value.startsWith(" ") ? value.substring(1) : value);
             }
@@ -115,7 +115,7 @@ public final class OpenAiResponsesClient implements ResponsesClient {
 
     private static ObjectNode processEvent(ObjectMapper json, StringBuilder data,
                                            Consumer<String> textDelta) throws IOException {
-        if (data.isEmpty() || data.toString().equals("[DONE]")) return null;
+        if (data.length() == 0 || data.toString().equals("[DONE]")) return null;
         JsonNode event = json.readTree(data.toString());
         String type = event.path("type").asText();
         if (type.equals("response.output_text.delta")) {

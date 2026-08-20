@@ -10,13 +10,17 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.Base64;
+import java.util.Objects;
 
 /** Immutable, bounded local image input using fx's magic-byte contract. */
-record ImageAttachment(Path path, String mediaType, byte[] bytes) {
+final class ImageAttachment {
     static final int MAX_IMAGE_BYTES = 20 * 1024 * 1024;
     static final int MAX_IMAGES_PER_PROMPT = 20;
+    private final Path path;
+    private final String mediaType;
+    private final byte[] bytes;
 
-    ImageAttachment {
+    ImageAttachment(Path path, String mediaType, byte[] bytes) {
         path = path.toAbsolutePath().normalize();
         bytes = bytes.clone();
         if (bytes.length > MAX_IMAGE_BYTES) throw new IllegalArgumentException("image exceeds the 20 MiB limit");
@@ -24,9 +28,37 @@ record ImageAttachment(Path path, String mediaType, byte[] bytes) {
         if (detected == null || !detected.equals(mediaType)) {
             throw new IllegalArgumentException("unsupported image type: " + path);
         }
+        this.path = path;
+        this.mediaType = mediaType;
+        this.bytes = bytes;
     }
 
-    @Override public byte[] bytes() { return bytes.clone(); }
+    public Path path() { return path; }
+    public String mediaType() { return mediaType; }
+    public byte[] bytes() { return bytes.clone(); }
+
+    @Override
+    public boolean equals(Object other) {
+        if (this == other) return true;
+        if (!(other instanceof ImageAttachment)) return false;
+        ImageAttachment that = (ImageAttachment) other;
+        return Objects.equals(path, that.path)
+                && Objects.equals(mediaType, that.mediaType)
+                && Objects.equals(bytes, that.bytes);
+    }
+
+    @Override
+    public int hashCode() {
+        int result = Objects.hashCode(path);
+        result = 31 * result + Objects.hashCode(mediaType);
+        result = 31 * result + Objects.hashCode(bytes);
+        return result;
+    }
+
+    @Override
+    public String toString() {
+        return "ImageAttachment[path=" + path + ", mediaType=" + mediaType + ", bytes=" + bytes + "]";
+    }
 
     static ImageAttachment load(Path workspace, String input) throws IOException {
         if (input == null || input.isBlank()) throw new IllegalArgumentException("image path must not be blank");

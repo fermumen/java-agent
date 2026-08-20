@@ -211,7 +211,7 @@ public final class Main {
                 : PermissionMode.parse(firstNonBlank(environment.get("JAVA_AGENT_PERMISSION_MODE"), "ask"));
         ObjectNode result = json.createObjectNode().put("kind", options.command);
         switch (options.command) {
-            case "status" -> {
+            case "status": {
                 Path workspace = options.workspace == null ? Path.of("") : Path.of(options.workspace);
                 result.put("version", VERSION).put("workspace", workspace.toAbsolutePath().normalize().toString())
                         .put("model", firstNonBlank(options.model, environment.get("OPENAI_MODEL"),
@@ -221,15 +221,17 @@ public final class Main {
                         .put("sandbox", "none")
                         .put("web_search", options.webSearch
                                 || Boolean.parseBoolean(environment.getOrDefault("JAVA_AGENT_WEB_SEARCH", "false")));
+                break;
             }
-            case "permissions" -> {
+            case "permissions": {
                 result.put("mode", mode.name().toLowerCase(java.util.Locale.ROOT))
                         .put("grant_count", 0).put("grant_scope", "session")
                         .put("runtime_grants_available", false).put("rules_scope", "persistent_config");
                 result.putArray("rules");
                 result.putArray("grants");
+                break;
             }
-            case "sessions" -> {
+            case "sessions": {
                 String configured = firstNonBlank(options.sessionRoot, environment.get("JAVA_AGENT_HOME"));
                 Path root = configured == null ? Path.of(System.getProperty("user.home"), ".java-agent")
                         : Path.of(configured);
@@ -248,8 +250,9 @@ public final class Main {
                             .put("created_at_ms", snapshot.createdAt()).put("updated_at_ms", snapshot.updatedAt())
                             .put("history_len", snapshot.input().size());
                 }
+                break;
             }
-            case "doctor" -> {
+            case "doctor": {
                 ArrayNode checks = result.putArray("checks");
                 checks.addObject().put("name", "java").put("status", "ok")
                         .put("detail", System.getProperty("java.version"));
@@ -263,15 +266,17 @@ public final class Main {
                         .put("detail", authenticated ? "OpenAI API key available" : "OpenAI API key is not configured");
                 int failures = (workspaceOk ? 0 : 1) + (authenticated ? 0 : 1);
                 result.put("ok_count", 3 - failures).put("warn_count", 0).put("fail_count", failures);
+                break;
             }
-            case "skills" -> {
+            case "skills": {
                 String configured = firstNonBlank(options.sessionRoot, environment.get("JAVA_AGENT_HOME"));
                 Path root = configured == null ? Path.of(System.getProperty("user.home"), ".java-agent")
                         : Path.of(configured);
                 Path workspace = options.workspace == null ? Path.of("") : Path.of(options.workspace);
                 SkillsCommand.populate(result, options.prompt, workspace, root, json);
+                break;
             }
-            case "mcp" -> {
+            case "mcp": {
                 String action = options.prompt.trim();
                 if (!action.isEmpty() && !action.equals("list") && !action.equals("status")) {
                     throw new IllegalArgumentException("Usage: mcp [list|status]");
@@ -287,8 +292,10 @@ public final class Main {
                     }
                     result.setAll(runtime.healthReport());
                 }
+                break;
             }
-            default -> throw new IllegalArgumentException("Unknown command: " + options.command);
+            default:
+                throw new IllegalArgumentException("Unknown command: " + options.command);
         }
         if (options.json) out.println(json.writeValueAsString(result));
         else result.properties().forEach(entry -> out.println(entry.getKey() + "=" + entry.getValue().asText()));
@@ -365,44 +372,42 @@ public final class Main {
     }
 
     private static String usage() {
-        return """
-                Usage:
-                  java -jar target/java-agent.jar [options] [ask] [prompt]
-                  java -jar target/java-agent.jar [options] acp
-                  java -jar target/java-agent.jar [options] skills [list|show|create|remove|install|path] [value]
-                  java -jar target/java-agent.jar [options] mcp [list|status]
-
-                Options:
-                  --model <id>          OpenAI model (env: OPENAI_MODEL; default: gpt-5.6)
-                  --base-url <url>      OpenAI API base URL (env: OPENAI_BASE_URL)
-                  --workspace <path>    Workspace root (default: current directory)
-                  --max-steps <count>   Maximum response/tool iterations, 1-100 (default: 20)
-                  --resume <id|last>     Resume a saved session for this workspace
-                  --session-root <path>  Session storage root (env: JAVA_AGENT_HOME)
-                  --mcp-config <path>    MCP JSON config (default: <session-root>/mcp.json)
-                  --no-save             Disable session persistence
-                  --json                Emit one structured JSON ask result
-                  --web-search          Enable OpenAI-hosted Responses web search
-                  --ask                Prompt before sensitive actions (default)
-                  --auto               Auto-allow external reads; deny writes/commands
-                  --yolo               Allow all actions and print a warning
-                  --yes                Alias for --yolo
-                  --help                Show help
-                  --version             Show version
-
-                Authentication:
-                  OPENAI_API_KEY (JAVA_AGENT_API_KEY is also accepted)
-
-                The harness uses POST /v1/responses with store=false.
-
-                Examples:
-                  java -jar target/java-agent.jar
-                  java -jar target/java-agent.jar ask "Explain this repository"
-                  java -jar target/java-agent.jar skills list
-                  java -jar target/java-agent.jar mcp list
-                  java -jar target/java-agent.jar --auto "Explain an external file"
-                  java -jar target/java-agent.jar --yolo "Fix the failing tests"
-                """;
+        return "Usage:\n"
+                + "  java -jar target/java-agent.jar [options] [ask] [prompt]\n"
+                + "  java -jar target/java-agent.jar [options] acp\n"
+                + "  java -jar target/java-agent.jar [options] skills [list|show|create|remove|install|path] [value]\n"
+                + "  java -jar target/java-agent.jar [options] mcp [list|status]\n"
+                + "\n"
+                + "Options:\n"
+                + "  --model <id>          OpenAI model (env: OPENAI_MODEL; default: gpt-5.6)\n"
+                + "  --base-url <url>      OpenAI API base URL (env: OPENAI_BASE_URL)\n"
+                + "  --workspace <path>    Workspace root (default: current directory)\n"
+                + "  --max-steps <count>   Maximum response/tool iterations, 1-100 (default: 20)\n"
+                + "  --resume <id|last>     Resume a saved session for this workspace\n"
+                + "  --session-root <path>  Session storage root (env: JAVA_AGENT_HOME)\n"
+                + "  --mcp-config <path>    MCP JSON config (default: <session-root>/mcp.json)\n"
+                + "  --no-save             Disable session persistence\n"
+                + "  --json                Emit one structured JSON ask result\n"
+                + "  --web-search          Enable OpenAI-hosted Responses web search\n"
+                + "  --ask                Prompt before sensitive actions (default)\n"
+                + "  --auto               Auto-allow external reads; deny writes/commands\n"
+                + "  --yolo               Allow all actions and print a warning\n"
+                + "  --yes                Alias for --yolo\n"
+                + "  --help                Show help\n"
+                + "  --version             Show version\n"
+                + "\n"
+                + "Authentication:\n"
+                + "  OPENAI_API_KEY (JAVA_AGENT_API_KEY is also accepted)\n"
+                + "\n"
+                + "The harness uses POST /v1/responses with store=false.\n"
+                + "\n"
+                + "Examples:\n"
+                + "  java -jar target/java-agent.jar\n"
+                + "  java -jar target/java-agent.jar ask \"Explain this repository\"\n"
+                + "  java -jar target/java-agent.jar skills list\n"
+                + "  java -jar target/java-agent.jar mcp list\n"
+                + "  java -jar target/java-agent.jar --auto \"Explain an external file\"\n"
+                + "  java -jar target/java-agent.jar --yolo \"Fix the failing tests\"\n";
     }
 
     private static final class Options {
@@ -437,48 +442,68 @@ public final class Main {
                     continue;
                 }
                 switch (argument) {
-                    case "--" -> literal = true;
-                    case "ask" -> {
+                    case "--":
+                        literal = true;
+                        break;
+                    case "ask": {
                         if (prompt.isEmpty() && result.command == null) result.explicitAsk = true;
                         else prompt.add(argument);
+                        break;
                     }
-                    case "status", "permissions", "doctor", "sessions", "skills", "mcp", "acp" -> {
+                    case "status":
+                    case "permissions":
+                    case "doctor":
+                    case "sessions":
+                    case "skills":
+                    case "mcp":
+                    case "acp": {
                         if (!result.explicitAsk && prompt.isEmpty() && result.command == null) result.command = argument;
                         else prompt.add(argument);
+                        break;
                     }
-                    case "--model" -> result.model = requireValue(args, ++index, argument);
-                    case "--base-url" -> result.baseUrl = requireValue(args, ++index, argument);
-                    case "--workspace" -> result.workspace = requireValue(args, ++index, argument);
-                    case "--resume" -> result.resume = requireValue(args, ++index, argument);
-                    case "--session-root" -> result.sessionRoot = requireValue(args, ++index, argument);
-                    case "--mcp-config" -> result.mcpConfig = requireValue(args, ++index, argument);
-                    case "--limit" -> result.sessionLimit = positiveInt(requireValue(args, ++index, argument), argument, 100);
-                    case "--cursor" -> result.sessionCursor = positiveInt(requireValue(args, ++index, argument), argument, 1_000_000) - 1;
-                    case "--max-steps" -> {
+                    case "--model": result.model = requireValue(args, ++index, argument); break;
+                    case "--base-url": result.baseUrl = requireValue(args, ++index, argument); break;
+                    case "--workspace": result.workspace = requireValue(args, ++index, argument); break;
+                    case "--resume": result.resume = requireValue(args, ++index, argument); break;
+                    case "--session-root": result.sessionRoot = requireValue(args, ++index, argument); break;
+                    case "--mcp-config": result.mcpConfig = requireValue(args, ++index, argument); break;
+                    case "--limit":
+                        result.sessionLimit = positiveInt(requireValue(args, ++index, argument), argument, 100);
+                        break;
+                    case "--cursor":
+                        result.sessionCursor = positiveInt(
+                                requireValue(args, ++index, argument), argument, 1_000_000) - 1;
+                        break;
+                    case "--max-steps": {
                         String value = requireValue(args, ++index, argument);
                         try {
                             result.maxSteps = Integer.parseInt(value);
                         } catch (NumberFormatException error) {
                             throw new IllegalArgumentException("--max-steps must be an integer");
                         }
+                        break;
                     }
-                    case "--ask" -> result.permissionMode = PermissionMode.ASK;
-                    case "--auto" -> result.permissionMode = PermissionMode.AUTO;
-                    case "--yes", "-y" -> result.permissionMode = PermissionMode.YOLO;
-                    case "--yolo" -> {
+                    case "--ask": result.permissionMode = PermissionMode.ASK; break;
+                    case "--auto": result.permissionMode = PermissionMode.AUTO; break;
+                    case "--yes":
+                    case "-y": result.permissionMode = PermissionMode.YOLO; break;
+                    case "--yolo": {
                         result.permissionMode = PermissionMode.YOLO;
                         result.yoloWarning = true;
+                        break;
                     }
-                    case "--no-save" -> result.noSave = true;
-                    case "--json" -> result.json = true;
-                    case "--web-search" -> result.webSearch = true;
-                    case "--help", "-h" -> result.help = true;
-                    case "--version" -> result.version = true;
-                    default -> {
+                    case "--no-save": result.noSave = true; break;
+                    case "--json": result.json = true; break;
+                    case "--web-search": result.webSearch = true; break;
+                    case "--help":
+                    case "-h": result.help = true; break;
+                    case "--version": result.version = true; break;
+                    default: {
                         if (argument.startsWith("-") && !"skills".equals(result.command)) {
                             throw new IllegalArgumentException("Unknown option: " + argument);
                         }
                         prompt.add(argument);
+                        break;
                     }
                 }
             }

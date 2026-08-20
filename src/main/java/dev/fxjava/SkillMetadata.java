@@ -6,6 +6,7 @@ import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 /** Small strict parser for the portable subset of fx SKILL.md metadata. */
 final class SkillMetadata {
@@ -19,16 +20,94 @@ final class SkillMetadata {
         UNSUPPORTED_MULTILINE, INVALID_UTF8, CONTROL_BYTE
     }
 
-    record Parsed(String name, String description, String body, Status status, Cause cause) {
+    static final class Parsed {
+        private final String name;
+        private final String description;
+        private final String body;
+        private final Status status;
+        private final Cause cause;
+
+        Parsed(String name, String description, String body, Status status, Cause cause) {
+            this.name = name;
+            this.description = description;
+            this.body = body;
+            this.status = status;
+            this.cause = cause;
+        }
+
+        public String name() { return name; }
+        public String description() { return description; }
+        public String body() { return body; }
+        public Status status() { return status; }
+        public Cause cause() { return cause; }
+
         Resolved resolve(String fallbackName) {
             if (status == Status.INVALID) return null;
             String resolvedName = status == Status.NO_FRONTMATTER ? fallbackName : name;
             if (invalidName(resolvedName) != null) return null;
             return new Resolved(resolvedName, status == Status.NO_FRONTMATTER || description == null ? "" : description);
         }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof Parsed)) return false;
+            Parsed that = (Parsed) other;
+            return Objects.equals(name, that.name)
+                    && Objects.equals(description, that.description)
+                    && Objects.equals(body, that.body)
+                    && status == that.status && cause == that.cause;
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(name);
+            result = 31 * result + Objects.hashCode(description);
+            result = 31 * result + Objects.hashCode(body);
+            result = 31 * result + Objects.hashCode(status);
+            result = 31 * result + Objects.hashCode(cause);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "Parsed[name=" + name + ", description=" + description + ", body=" + body
+                    + ", status=" + status + ", cause=" + cause + "]";
+        }
     }
 
-    record Resolved(String name, String description) { }
+    static final class Resolved {
+        private final String name;
+        private final String description;
+
+        Resolved(String name, String description) {
+            this.name = name;
+            this.description = description;
+        }
+
+        public String name() { return name; }
+        public String description() { return description; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof Resolved)) return false;
+            Resolved that = (Resolved) other;
+            return Objects.equals(name, that.name) && Objects.equals(description, that.description);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(name);
+            result = 31 * result + Objects.hashCode(description);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "Resolved[name=" + name + ", description=" + description + "]";
+        }
+    }
 
     private SkillMetadata() { }
 
@@ -262,15 +341,80 @@ final class SkillMetadata {
         FOLDED_CLIP, FOLDED_STRIP, LITERAL;
 
         static BlockStyle from(String value) {
-            return switch (value) {
-                case ">" -> FOLDED_CLIP;
-                case ">-" -> FOLDED_STRIP;
-                case "|" -> LITERAL;
-                default -> null;
-            };
+            switch (value) {
+                case ">": return FOLDED_CLIP;
+                case ">-": return FOLDED_STRIP;
+                case "|": return LITERAL;
+                default: return null;
+            }
         }
     }
 
-    private record Value(String text, Cause cause) { }
-    private record Block(String text, int nextIndex, Cause cause) { }
+    private static final class Value {
+        private final String text;
+        private final Cause cause;
+
+        Value(String text, Cause cause) {
+            this.text = text;
+            this.cause = cause;
+        }
+
+        public String text() { return text; }
+        public Cause cause() { return cause; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof Value)) return false;
+            Value that = (Value) other;
+            return Objects.equals(text, that.text) && cause == that.cause;
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(text);
+            result = 31 * result + Objects.hashCode(cause);
+            return result;
+        }
+
+        @Override
+        public String toString() { return "Value[text=" + text + ", cause=" + cause + "]"; }
+    }
+
+    private static final class Block {
+        private final String text;
+        private final int nextIndex;
+        private final Cause cause;
+
+        Block(String text, int nextIndex, Cause cause) {
+            this.text = text;
+            this.nextIndex = nextIndex;
+            this.cause = cause;
+        }
+
+        public String text() { return text; }
+        public int nextIndex() { return nextIndex; }
+        public Cause cause() { return cause; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof Block)) return false;
+            Block that = (Block) other;
+            return nextIndex == that.nextIndex && Objects.equals(text, that.text) && cause == that.cause;
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(text);
+            result = 31 * result + Integer.hashCode(nextIndex);
+            result = 31 * result + Objects.hashCode(cause);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "Block[text=" + text + ", nextIndex=" + nextIndex + ", cause=" + cause + "]";
+        }
+    }
 }

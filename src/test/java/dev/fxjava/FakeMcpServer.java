@@ -27,27 +27,48 @@ public final class FakeMcpServer {
             response.set("id", request.get("id").deepCopy());
             String method = request.path("method").asText();
             switch (method) {
-                case "initialize" -> initialize(response);
-                case "tools/list" -> listTools(request, response);
-                case "tools/call" -> callTool(request, response);
-                case "resources/list" -> listResources(request, response);
-                case "resources/templates/list" -> response.putObject("result").putArray("resourceTemplates")
-                        .addObject().put("uriTemplate", "fixture:///{name}").put("name", "fixture");
-                case "resources/read" -> readResource(request, response, subscriptions.size());
-                case "resources/subscribe" -> {
+                case "initialize":
+                    initialize(response);
+                    break;
+                case "tools/list":
+                    listTools(request, response);
+                    break;
+                case "tools/call":
+                    callTool(request, response);
+                    break;
+                case "resources/list":
+                    listResources(request, response);
+                    break;
+                case "resources/templates/list":
+                    response.putObject("result").putArray("resourceTemplates")
+                            .addObject().put("uriTemplate", "fixture:///{name}").put("name", "fixture");
+                    break;
+                case "resources/read":
+                    readResource(request, response, subscriptions.size());
+                    break;
+                case "resources/subscribe":
                     String uri = request.path("params").path("uri").asText();
                     subscriptions.add(uri);
                     output.println(update(json, "fixture:///unsubscribed"));
                     output.println(update(json, uri));
                     response.putObject("result");
-                }
-                case "prompts/list" -> response.putObject("result").putArray("prompts")
-                        .addObject().put("name", "review").put("description", "Review prompt");
-                case "prompts/get" -> response.putObject("result").putArray("messages")
-                        .addObject().put("role", "user").putObject("content").put("type", "text").put("text", "review it");
-                case "completion/complete" -> response.putObject("result").putObject("completion")
-                        .putArray("values").add("alpha").add("beta");
-                default -> response.putObject("error").put("code", -32601).put("message", "unknown");
+                    break;
+                case "prompts/list":
+                    response.putObject("result").putArray("prompts")
+                            .addObject().put("name", "review").put("description", "Review prompt");
+                    break;
+                case "prompts/get":
+                    response.putObject("result").putArray("messages")
+                            .addObject().put("role", "user").putObject("content")
+                            .put("type", "text").put("text", "review it");
+                    break;
+                case "completion/complete":
+                    response.putObject("result").putObject("completion")
+                            .putArray("values").add("alpha").add("beta");
+                    break;
+                default:
+                    response.putObject("error").put("code", -32601).put("message", "unknown");
+                    break;
             }
             output.println(json.writeValueAsString(response));
         }

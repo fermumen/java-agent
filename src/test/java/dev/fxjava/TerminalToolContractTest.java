@@ -133,9 +133,9 @@ class TerminalToolContractTest {
         ObjectNode result = json.createObjectNode();
         for (int i = 0; i < values.length; i += 2) {
             Object value = values[i + 1];
-            if (value instanceof JsonNode node) result.set((String) values[i], node);
-            else if (value instanceof Integer number) result.put((String) values[i], number);
-            else if (value instanceof Long number) result.put((String) values[i], number);
+            if (value instanceof JsonNode) result.set((String) values[i], (JsonNode) value);
+            else if (value instanceof Integer) result.put((String) values[i], (Integer) value);
+            else if (value instanceof Long) result.put((String) values[i], (Long) value);
             else result.put((String) values[i], String.valueOf(value));
         }
         return result;

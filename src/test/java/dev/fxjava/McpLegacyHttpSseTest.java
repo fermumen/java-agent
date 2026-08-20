@@ -192,22 +192,27 @@ class McpLegacyHttpSseTest {
             ObjectNode response = json.createObjectNode().put("jsonrpc", "2.0");
             response.set("id", request.get("id").deepCopy());
             switch (method) {
-                case "initialize" -> response.putObject("result")
-                        .put("protocolVersion", protocolVersion)
-                        .putObject("capabilities").putObject("tools");
-                case "tools/list" -> {
+                case "initialize":
+                    response.putObject("result").put("protocolVersion", protocolVersion)
+                            .putObject("capabilities").putObject("tools");
+                    break;
+                case "tools/list": {
                     toolsListCalls.incrementAndGet();
                     ObjectNode tool = response.putObject("result").putArray("tools").addObject();
                     tool.put("name", currentTool).put("description", "Legacy echo");
                     tool.putObject("annotations").put("readOnlyHint", true);
                     ObjectNode schema = tool.putObject("inputSchema").put("type", "object");
                     schema.putObject("properties").putObject("text").put("type", "string");
+                    break;
                 }
-                case "tools/call" -> response.putObject("result").putArray("content").addObject()
-                        .put("type", "text").put("text", (listChanged
-                                ? request.path("params").path("name").asText() : "legacy") + ":"
-                                + request.path("params").path("arguments").path("text").asText());
-                default -> throw new IOException("Unexpected request: " + method);
+                case "tools/call":
+                    response.putObject("result").putArray("content").addObject()
+                            .put("type", "text").put("text", (listChanged
+                                    ? request.path("params").path("name").asText() : "legacy") + ":"
+                                    + request.path("params").path("arguments").path("text").asText());
+                    break;
+                default:
+                    throw new IOException("Unexpected request: " + method);
             }
             emit("event: message" + delimiter + "data: " + json.writeValueAsString(response)
                     + delimiter + delimiter);

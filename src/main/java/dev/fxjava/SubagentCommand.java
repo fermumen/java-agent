@@ -6,10 +6,11 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.Objects;
 import java.util.Set;
 
 /** Strict decoder/defaulting for fx's six-branch public subagent command. */
-record SubagentCommand(String branch, ObjectNode value) {
+final class SubagentCommand {
     static final int MAX_NAME_BYTES = 128;
     static final int MAX_MODEL_BYTES = 256;
     static final int MAX_PROMPT_BYTES = 64 * 1024;
@@ -20,6 +21,36 @@ record SubagentCommand(String branch, ObjectNode value) {
             "create", "inspect", "message", "relationship", "configure", "lifecycle");
     private static final Set<String> SECTIONS = Set.of(
             "status", "messages", "tool_activity", "events", "configuration", "relationship");
+    private final String branch;
+    private final ObjectNode value;
+
+    SubagentCommand(String branch, ObjectNode value) {
+        this.branch = branch;
+        this.value = value;
+    }
+
+    public String branch() { return branch; }
+    public ObjectNode value() { return value; }
+
+    @Override
+    public boolean equals(Object other) {
+        if (this == other) return true;
+        if (!(other instanceof SubagentCommand)) return false;
+        SubagentCommand that = (SubagentCommand) other;
+        return Objects.equals(branch, that.branch) && Objects.equals(value, that.value);
+    }
+
+    @Override
+    public int hashCode() {
+        int result = Objects.hashCode(branch);
+        result = 31 * result + Objects.hashCode(value);
+        return result;
+    }
+
+    @Override
+    public String toString() {
+        return "SubagentCommand[branch=" + branch + ", value=" + value + "]";
+    }
 
     static SubagentCommand parse(JsonNode arguments) {
         requireObject(arguments, "invalid_root");
@@ -33,13 +64,13 @@ record SubagentCommand(String branch, ObjectNode value) {
         requireObject(selected, "invalid_field_type");
         ObjectNode value = ((ObjectNode) selected).deepCopy();
         switch (branch) {
-            case "create" -> validateCreate(value);
-            case "inspect" -> validateInspect(value);
-            case "message" -> validateMessage(value);
-            case "relationship" -> validateRelationship(value);
-            case "configure" -> validateConfigure(value);
-            case "lifecycle" -> validateLifecycle(value);
-            default -> throw invalid("invalid_branch_selection");
+            case "create": validateCreate(value); break;
+            case "inspect": validateInspect(value); break;
+            case "message": validateMessage(value); break;
+            case "relationship": validateRelationship(value); break;
+            case "configure": validateConfigure(value); break;
+            case "lifecycle": validateLifecycle(value); break;
+            default: throw invalid("invalid_branch_selection");
         }
         return new SubagentCommand(branch, value);
     }

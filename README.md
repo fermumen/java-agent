@@ -1,6 +1,6 @@
 # java-agent
 
-`java-agent` is a small Java 17 coding-agent harness inspired by the
+`java-agent` is a small Java 11 coding-agent harness inspired by the
 [Vercel Labs `fx` project](https://github.com/vercel-labs/fx). It uses the OpenAI
 Responses API directly. It does not contain a Vercel AI Gateway or Chat
 Completions transport.
@@ -16,7 +16,8 @@ standard corporate JVM proxy and trust-store settings continue to apply.
 - Native Responses SSE streaming with incremental text output
 - Bounded `Retry-After`/exponential recovery for pre-output 429 and transient 5xx Responses statuses
 - Stateless API requests with `store=false`
-- Atomic local sessions with latest/resume/recover and corrupt-record isolation
+- Atomic schema-v2 local sessions with v1 compatibility, exact artifact
+  manifests, latest/resume/recover, and corrupt-record isolation
 - Replay of response output items, including encrypted reasoning content
 - All 13 fx filesystem tools: list, glob, grep, read, write, edit, delete,
   rename, copy, create-folder, metadata, lexical semantic search, and Windows open
@@ -48,7 +49,7 @@ standard corporate JVM proxy and trust-store settings continue to apply.
 
 ## Build
 
-Requirements: JDK 17 or newer and Maven 3.8 or newer.
+Requirements: JDK 11 or newer and Maven 3.8 or newer.
 
 ```sh
 mvn clean verify
@@ -124,7 +125,7 @@ keep confirmation enabled and use your corporate sandbox where appropriate.
 
 Gateway support and further ACP parity are intentionally excluded. The existing compact ACP mode remains available for compatibility. Responses compaction,
 crash-recoverable terminal sessions and full PTY/ANSI screen behavior, richer
-permission rules, MCP OAuth/filtered subscriptions, remote skill sources
+permission rules, MCP OAuth/fx multiplexed subscription streams, remote skill sources
 and full-screen skill management, richer subagent identity isolation, media
 tools, and the full-screen UI remain fx parity work. The implemented terminal boundary is documented in
 [`docs/terminal-parity.md`](docs/terminal-parity.md). The session/streaming

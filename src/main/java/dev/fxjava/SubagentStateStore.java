@@ -12,6 +12,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 /** Atomic, symlink-rejecting persistence for process-recoverable child control state. */
 final class SubagentStateStore {
@@ -38,8 +39,8 @@ final class SubagentStateStore {
                         || Files.size(file) > MAX_BYTES) continue;
                 try {
                     JsonNode decoded = json.readTree(Files.readAllBytes(file));
-                    if (decoded instanceof ObjectNode object && object.path("schema_version").asInt() == 1) {
-                        result.add(object);
+                    if (decoded instanceof ObjectNode && decoded.path("schema_version").asInt() == 1) {
+                        result.add((ObjectNode) decoded);
                     }
                 } catch (Exception corrupt) {
                     // Corrupt records remain isolated from other children.
@@ -133,7 +134,45 @@ final class SubagentStateStore {
         }
     }
 
-    record Operation(String operationId, String requestFingerprint, String receipt) { }
+    static final class Operation {
+        private final String operationId;
+        private final String requestFingerprint;
+        private final String receipt;
+
+        Operation(String operationId, String requestFingerprint, String receipt) {
+            this.operationId = operationId;
+            this.requestFingerprint = requestFingerprint;
+            this.receipt = receipt;
+        }
+
+        public String operationId() { return operationId; }
+        public String requestFingerprint() { return requestFingerprint; }
+        public String receipt() { return receipt; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof Operation)) return false;
+            Operation that = (Operation) other;
+            return Objects.equals(operationId, that.operationId)
+                    && Objects.equals(requestFingerprint, that.requestFingerprint)
+                    && Objects.equals(receipt, that.receipt);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(operationId);
+            result = 31 * result + Objects.hashCode(requestFingerprint);
+            result = 31 * result + Objects.hashCode(receipt);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "Operation[operationId=" + operationId + ", requestFingerprint=" + requestFingerprint
+                    + ", receipt=" + receipt + "]";
+        }
+    }
 
     private void rejectDirectory() throws IOException {
         if (Files.isSymbolicLink(directory) || !Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) {

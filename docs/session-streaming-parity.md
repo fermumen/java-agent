@@ -17,12 +17,17 @@ observable contracts:
 - workspace-scoped latest pointers, repair, and cross-workspace isolation;
 - newest-first bounded catalogs with corrupt-record isolation;
 - independent recovery copies that leave their source unchanged;
+- non-mutating schema-v1 reads and schema-v2 rewrite on the next successful
+  save, with unknown future schemas rejected;
+- deterministic, bounded artifact manifests that match the snapshot's exact
+  image and tool-result references;
 - persisted instructions and complete stateless Responses input replay;
 - content-addressed image sidecars with MIME, digest, size, symlink, recovery,
   deletion, and deduplication checks;
 - stable session-scoped sidecar handles for tool output over 16 KiB, 4 KiB
   UTF-8-safe previews, 64 KiB bounded reads, literal line queries, digest
-  verification, recovery copying, and deletion;
+  verification, exact authenticated recovery copying, orphan exclusion, and
+  deletion;
 - provider-token, credentialed-URL, sensitive-assignment, and structured JSON
   argument masking before model replay, previews, snapshots, and sidecar writes;
 - defensive deep copies at persistence and agent boundaries;
@@ -50,8 +55,13 @@ sessions/<session-id>/tool-results/result-<tool>-<call-hash>-<content-hash>.txt
 latest/<workspace-hash>.txt
 ```
 
-The schema is intentionally one bounded JSON snapshot rather than fx's
+Schema v2 is intentionally one bounded JSON snapshot rather than fx's
 multi-file event log. It is capped at 8 MiB and is written by atomic rename.
+Its embedded artifact manifest contains canonical sorted image and tool-result
+references. Version-1 snapshots remain readable without being modified and are
+rewritten as v2 on their next save. Missing, tampered, non-canonical, or
+manifest-mismatched referenced artifacts isolate the session from catalogs;
+unreferenced sidecars are never propagated into a recovered session.
 Inline image data URLs are externalized to verified sidecars before that limit is
 measured and hydrated when a snapshot is loaded. Large tool outputs are likewise
 kept out of session JSON; only their bounded preview and exact retrieval handle
@@ -59,8 +69,9 @@ enter Responses history.
 
 ## Deliberate limits
 
-This phase does not claim fx's schema migration, artifact manifests, Responses
-compaction, or background-process recovery. Those remain separate parity work.
+This phase does not claim fx's event-log/projection migration machinery,
+Responses compaction, or background-process recovery. Those remain separate
+parity work.
 Transport failures and streams that have started producing output are surfaced
 without automatic replay because delivery cannot be proven safe.
 The network transport is native

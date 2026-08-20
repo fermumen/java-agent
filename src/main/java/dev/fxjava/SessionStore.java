@@ -23,14 +23,18 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HexFormat;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /** Compact, atomic persisted-session store derived from fx's durable core contracts. */
 public final class SessionStore {
-    private static final int SCHEMA_VERSION = 1;
+    private static final int LEGACY_SCHEMA_VERSION = 1;
+    private static final int SCHEMA_VERSION = 2;
+    private static final int MAX_ARTIFACT_REFERENCES = 512;
     private static final int MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024;
     private static final Pattern SAFE_ID = Pattern.compile("[A-Za-z0-9][A-Za-z0-9_-]{0,127}");
     private static final Object JVM_MUTATION_LOCK = new Object();
@@ -88,7 +92,10 @@ public final class SessionStore {
             Path directory = sessionDirectory(snapshot.id());
             createManagedDirectory(directory);
             ArrayNode persisted = SessionImages.externalize(directory, snapshot.input());
-            ObjectNode encoded = encode(snapshot, persisted);
+            ArtifactManifest artifacts = ArtifactManifest.from(persisted);
+            SessionImages.verifySidecars(directory, artifacts.images());
+            ToolResultStore.verifySidecars(directory, artifacts.toolResults());
+            ObjectNode encoded = encode(snapshot, persisted, artifacts);
             validateEncoded(snapshot, encoded);
             atomicWrite(directory.resolve("session.json"), json.writeValueAsString(encoded));
             writeLatestUnlocked(snapshot.workspace(), snapshot.id());
@@ -107,10 +114,15 @@ public final class SessionStore {
         } catch (RuntimeException parseFailure) {
             throw new IOException("Corrupt session snapshot: " + id, parseFailure);
         }
-        Snapshot decoded = decode(id, node);
-        ArrayNode hydrated = SessionImages.hydrate(file.getParent(), decoded.input());
-        return new Snapshot(decoded.id(), decoded.workspace(), decoded.model(), decoded.title(),
-                decoded.instructions(), decoded.createdAt(), decoded.updatedAt(), hydrated);
+        Decoded decoded = decode(id, node);
+        if (decoded.artifacts() != null) {
+            decoded.artifacts().validateAgainst(decoded.snapshot().input());
+            ToolResultStore.verifySidecars(file.getParent(), decoded.artifacts().toolResults());
+        }
+        Snapshot snapshot = decoded.snapshot();
+        ArrayNode hydrated = SessionImages.hydrate(file.getParent(), snapshot.input());
+        return new Snapshot(snapshot.id(), snapshot.workspace(), snapshot.model(), snapshot.title(),
+                snapshot.instructions(), snapshot.createdAt(), snapshot.updatedAt(), hydrated);
     }
 
     public Snapshot latest(Path workspace) throws IOException {
@@ -163,8 +175,9 @@ public final class SessionStore {
         long now = clock.millis();
         Snapshot recovered = new Snapshot(newId(now), source.workspace(), source.model(), source.title(),
                 source.instructions(), now, now, source.input());
+        List<String> results = ToolResultStore.referencedHandles(source.input());
+        ToolResultStore.copySidecars(sessionDirectory(id), sessionDirectory(recovered.id()), results);
         save(recovered);
-        ToolResultStore.copySidecars(sessionDirectory(id), sessionDirectory(recovered.id()));
         return recovered;
     }
 
@@ -206,7 +219,7 @@ public final class SessionStore {
         });
     }
 
-    private ObjectNode encode(Snapshot snapshot, ArrayNode input) {
+    private ObjectNode encode(Snapshot snapshot, ArrayNode input, ArtifactManifest artifacts) {
         ObjectNode node = json.createObjectNode();
         node.put("schema_version", SCHEMA_VERSION);
         node.put("id", snapshot.id());
@@ -217,11 +230,20 @@ public final class SessionStore {
         node.put("created_at", snapshot.createdAt());
         node.put("updated_at", snapshot.updatedAt());
         node.set("input", input);
+        ObjectNode encodedArtifacts = node.putObject("artifacts");
+        ArrayNode images = encodedArtifacts.putArray("images");
+        artifacts.images().forEach(images::add);
+        ArrayNode results = encodedArtifacts.putArray("tool_results");
+        artifacts.toolResults().forEach(results::add);
         return node;
     }
 
-    private Snapshot decode(String expectedId, JsonNode node) throws IOException {
-        if (!node.isObject() || node.path("schema_version").asInt(-1) != SCHEMA_VERSION) {
+    private Decoded decode(String expectedId, JsonNode node) throws IOException {
+        if (!node.isObject()) {
+            throw new IOException("Unsupported or corrupt session snapshot: " + expectedId);
+        }
+        int schemaVersion = node.path("schema_version").asInt(-1);
+        if (schemaVersion != LEGACY_SCHEMA_VERSION && schemaVersion != SCHEMA_VERSION) {
             throw new IOException("Unsupported or corrupt session snapshot: " + expectedId);
         }
         String id = requiredText(node, "id");
@@ -235,8 +257,11 @@ public final class SessionStore {
         if (created < 0 || updated < created || !node.path("input").isArray()) {
             throw new IOException("Invalid session timeline or input: " + expectedId);
         }
-        return new Snapshot(id, workspace, model, title, instructions, created, updated,
+        Snapshot snapshot = new Snapshot(id, workspace, model, title, instructions, created, updated,
                 (ArrayNode) node.path("input"));
+        ArtifactManifest artifacts = schemaVersion == SCHEMA_VERSION
+                ? ArtifactManifest.decode(node.path("artifacts")) : null;
+        return new Decoded(snapshot, artifacts);
     }
 
     private void validate(Snapshot snapshot) throws IOException {
@@ -319,7 +344,7 @@ public final class SessionStore {
     private static String workspaceKey(String workspace) {
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256").digest(workspace.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(digest, 0, 16);
+            return Hex.encode(digest, 0, 16);
         } catch (NoSuchAlgorithmException impossible) {
             throw new IllegalStateException(impossible);
         }
@@ -346,15 +371,160 @@ public final class SessionStore {
         return value.asLong();
     }
 
-    public record Snapshot(String id, String workspace, String model, String title, String instructions,
-                           long createdAt, long updatedAt, ArrayNode input) {
-        public Snapshot {
-            input = input == null ? new ObjectMapper().createArrayNode() : input.deepCopy();
-            title = title == null ? "" : title;
+    public static final class Snapshot {
+        private final String id;
+        private final String workspace;
+        private final String model;
+        private final String title;
+        private final String instructions;
+        private final long createdAt;
+        private final long updatedAt;
+        private final ArrayNode input;
+
+        public Snapshot(String id, String workspace, String model, String title, String instructions,
+                        long createdAt, long updatedAt, ArrayNode input) {
+            this.id = id;
+            this.workspace = workspace;
+            this.model = model;
+            this.title = title == null ? "" : title;
+            this.instructions = instructions;
+            this.createdAt = createdAt;
+            this.updatedAt = updatedAt;
+            this.input = input == null ? new ObjectMapper().createArrayNode() : input.deepCopy();
         }
 
-        @Override public ArrayNode input() {
-            return input.deepCopy();
+        public String id() { return id; }
+        public String workspace() { return workspace; }
+        public String model() { return model; }
+        public String title() { return title; }
+        public String instructions() { return instructions; }
+        public long createdAt() { return createdAt; }
+        public long updatedAt() { return updatedAt; }
+        public ArrayNode input() { return input.deepCopy(); }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof Snapshot)) return false;
+            Snapshot that = (Snapshot) other;
+            return createdAt == that.createdAt && updatedAt == that.updatedAt
+                    && Objects.equals(id, that.id) && Objects.equals(workspace, that.workspace)
+                    && Objects.equals(model, that.model) && Objects.equals(title, that.title)
+                    && Objects.equals(instructions, that.instructions) && Objects.equals(input, that.input);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(id);
+            result = 31 * result + Objects.hashCode(workspace);
+            result = 31 * result + Objects.hashCode(model);
+            result = 31 * result + Objects.hashCode(title);
+            result = 31 * result + Objects.hashCode(instructions);
+            result = 31 * result + Long.hashCode(createdAt);
+            result = 31 * result + Long.hashCode(updatedAt);
+            return 31 * result + Objects.hashCode(input);
+        }
+
+        @Override
+        public String toString() {
+            return "Snapshot[id=" + id + ", workspace=" + workspace + ", model=" + model
+                    + ", title=" + title + ", instructions=" + instructions + ", createdAt=" + createdAt
+                    + ", updatedAt=" + updatedAt + ", input=" + input + "]";
+        }
+    }
+
+    private static final class Decoded {
+        private final Snapshot snapshot;
+        private final ArtifactManifest artifacts;
+
+        private Decoded(Snapshot snapshot, ArtifactManifest artifacts) {
+            this.snapshot = snapshot;
+            this.artifacts = artifacts;
+        }
+
+        Snapshot snapshot() { return snapshot; }
+        ArtifactManifest artifacts() { return artifacts; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof Decoded)) return false;
+            Decoded that = (Decoded) other;
+            return Objects.equals(snapshot, that.snapshot) && Objects.equals(artifacts, that.artifacts);
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * Objects.hashCode(snapshot) + Objects.hashCode(artifacts);
+        }
+
+        @Override
+        public String toString() {
+            return "Decoded[snapshot=" + snapshot + ", artifacts=" + artifacts + "]";
+        }
+    }
+
+    private static final class ArtifactManifest {
+        private final List<String> images;
+        private final List<String> toolResults;
+
+        private ArtifactManifest(List<String> images, List<String> toolResults) {
+            this.images = List.copyOf(images);
+            this.toolResults = List.copyOf(toolResults);
+        }
+
+        List<String> images() { return images; }
+        List<String> toolResults() { return toolResults; }
+
+        static ArtifactManifest from(JsonNode input) throws IOException {
+            return new ArtifactManifest(SessionImages.referencedFiles(input),
+                    ToolResultStore.referencedHandles(input));
+        }
+
+        static ArtifactManifest decode(JsonNode node) throws IOException {
+            if (!node.isObject()) throw new IOException("Invalid session artifact manifest");
+            return new ArtifactManifest(readList(node, "images"), readList(node, "tool_results"));
+        }
+
+        void validateAgainst(JsonNode input) throws IOException {
+            ArtifactManifest actual = from(input);
+            if (!equals(actual)) throw new IOException("Session artifact manifest mismatch");
+        }
+
+        private static List<String> readList(JsonNode node, String field) throws IOException {
+            JsonNode values = node.get(field);
+            if (values == null || !values.isArray() || values.size() > MAX_ARTIFACT_REFERENCES) {
+                throw new IOException("Invalid session artifact manifest field: " + field);
+            }
+            List<String> result = new ArrayList<>();
+            for (JsonNode value : values) {
+                if (!value.isTextual() || value.asText().length() > 160) {
+                    throw new IOException("Invalid session artifact manifest field: " + field);
+                }
+                result.add(value.asText());
+            }
+            List<String> canonical = new LinkedHashSet<>(result).stream().sorted()
+                    .collect(Collectors.toList());
+            if (!result.equals(canonical)) throw new IOException("Non-canonical session artifact manifest");
+            return result;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof ArtifactManifest)) return false;
+            ArtifactManifest that = (ArtifactManifest) other;
+            return Objects.equals(images, that.images) && Objects.equals(toolResults, that.toolResults);
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * Objects.hashCode(images) + Objects.hashCode(toolResults);
+        }
+
+        @Override
+        public String toString() {
+            return "ArtifactManifest[images=" + images + ", toolResults=" + toolResults + "]";
         }
     }
 }

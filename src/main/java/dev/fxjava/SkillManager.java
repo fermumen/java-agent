@@ -8,6 +8,7 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.Comparator;
+import java.util.stream.Collectors;
 
 /** Managed skill create/remove operations kept separate from compatibility roots. */
 final class SkillManager {
@@ -49,7 +50,7 @@ final class SkillManager {
             throw new IOException("Managed skill does not exist or is unsafe: " + name);
         }
         try (var paths = Files.walk(directory)) {
-            for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) Files.delete(path);
+            for (Path path : paths.sorted(Comparator.reverseOrder()).collect(Collectors.toList())) Files.delete(path);
         }
     }
 
@@ -62,6 +63,7 @@ final class SkillManager {
     }
 
     private Path prepareRoot() throws IOException {
+        if (Files.exists(managedRoot, LinkOption.NOFOLLOW_LINKS)) return requireRoot();
         Files.createDirectories(managedRoot);
         return requireRoot();
     }

@@ -17,6 +17,7 @@ import java.util.Locale;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.stream.Collectors;
 
 /** Compact catalog and shared Windows-oriented workspace boundary. */
 public final class WorkspaceTools {
@@ -39,7 +40,8 @@ public final class WorkspaceTools {
         RunCommand commands = new RunCommand(paths);
         tools.add(commands);
         tools.add(new TerminalTool(paths, commands));
-        return tools.stream().map(tool -> (Tool) new ExternalApprovalTool(tool, paths)).toList();
+        return List.copyOf(tools.stream().map(tool -> (Tool) new ExternalApprovalTool(tool, paths))
+                .collect(Collectors.toList()));
     }
 
     private static final class ExternalApprovalTool implements Tool {
@@ -59,12 +61,22 @@ public final class WorkspaceTools {
         @Override
         public boolean requiresApproval(JsonNode arguments) throws Exception {
             if (delegate.requiresApproval(arguments)) return true;
-            String requested = switch (name()) {
-                case "list_files", "glob_files", "grep_files", "semantic_search" ->
-                        optionalText(arguments, "path", ".");
-                case "read_file", "file_info" -> requiredText(arguments, "path");
-                default -> null;
-            };
+            String requested;
+            switch (name()) {
+                case "list_files":
+                case "glob_files":
+                case "grep_files":
+                case "semantic_search":
+                    requested = optionalText(arguments, "path", ".");
+                    break;
+                case "read_file":
+                case "file_info":
+                    requested = requiredText(arguments, "path");
+                    break;
+                default:
+                    requested = null;
+                    break;
+            }
             return requested != null && workspace.isExternalExisting(requested);
         }
 

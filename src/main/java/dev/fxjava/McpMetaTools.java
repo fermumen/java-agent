@@ -8,10 +8,42 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 
 /** fx-compatible MCP metadata and feature tools over the compact runtime. */
 final class McpMetaTools {
     private McpMetaTools() { }
+
+    private static final class Match {
+        private final McpRuntime.McpToolInfo info;
+        private final int score;
+
+        private Match(McpRuntime.McpToolInfo info, int score) {
+            this.info = info;
+            this.score = score;
+        }
+
+        public McpRuntime.McpToolInfo info() { return info; }
+        public int score() { return score; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (other == null || getClass() != other.getClass()) return false;
+            Match that = (Match) other;
+            return score == that.score && Objects.equals(info, that.info);
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * Objects.hashCode(info) + Integer.hashCode(score);
+        }
+
+        @Override
+        public String toString() {
+            return "Match[info=" + info + ", score=" + score + "]";
+        }
+    }
 
     static List<Tool> create(McpRuntime runtime) {
         return List.of(new Search(runtime), new Select(runtime), new Features(runtime));
@@ -45,7 +77,6 @@ final class McpMetaTools {
         @Override public String execute(JsonNode arguments) throws Exception {
             String query = required(arguments, "query").toLowerCase(Locale.ROOT);
             int limit = integer(arguments, "limit", 8, 1, 32);
-            record Match(McpRuntime.McpToolInfo info, int score) { }
             List<Match> matches = new ArrayList<>();
             for (McpRuntime.McpToolInfo info : runtime.toolCatalog()) {
                 String name = info.publicName().toLowerCase(Locale.ROOT);
@@ -121,17 +152,33 @@ final class McpMetaTools {
         @Override public String execute(JsonNode arguments) throws Exception {
             String action = required(arguments, "action");
             String server = required(arguments, "server");
-            JsonNode result = switch (action) {
-                case "resource_list" -> runtime.pagedFeature(server, "resources/list", "resources");
-                case "resource_templates" -> runtime.pagedFeature(server, "resources/templates/list", "resourceTemplates");
-                case "prompt_list" -> runtime.pagedFeature(server, "prompts/list", "prompts");
-                case "resource_read" -> runtime.featureRequest(server, "resources/read",
-                        runtime.json().createObjectNode().put("uri", required(arguments, "uri")));
-                case "prompt_get" -> promptGet(server, arguments);
-                case "prompt_complete" -> complete(server, arguments, true);
-                case "resource_complete" -> complete(server, arguments, false);
-                default -> throw new IOException("Unknown MCP feature action: " + action);
-            };
+            JsonNode result;
+            switch (action) {
+                case "resource_list":
+                    result = runtime.pagedFeature(server, "resources/list", "resources");
+                    break;
+                case "resource_templates":
+                    result = runtime.pagedFeature(server, "resources/templates/list", "resourceTemplates");
+                    break;
+                case "prompt_list":
+                    result = runtime.pagedFeature(server, "prompts/list", "prompts");
+                    break;
+                case "resource_read":
+                    result = runtime.featureRequest(server, "resources/read",
+                            runtime.json().createObjectNode().put("uri", required(arguments, "uri")));
+                    break;
+                case "prompt_get":
+                    result = promptGet(server, arguments);
+                    break;
+                case "prompt_complete":
+                    result = complete(server, arguments, true);
+                    break;
+                case "resource_complete":
+                    result = complete(server, arguments, false);
+                    break;
+                default:
+                    throw new IOException("Unknown MCP feature action: " + action);
+            }
             return runtime.bounded(result);
         }
 

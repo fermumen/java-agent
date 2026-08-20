@@ -18,7 +18,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /** Compact fx-compatible implementations of the five foundational file tools. */
@@ -78,7 +80,7 @@ final class FxCoreFileTools {
         List<Path> entries;
         try (Stream<Path> stream = Files.list(directory)) {
             entries = stream.filter(path -> !FxIgnoredPaths.direct(path)).sorted(Comparator.comparing(path -> path.getFileName().toString()))
-                    .limit(MAX_LIST_ENTRIES + 1L).toList();
+                    .limit(MAX_LIST_ENTRIES + 1L).collect(Collectors.toList());
         }
         String display = workspace.display(directory);
         StringBuilder output = new StringBuilder(display.isEmpty() ? "." : display).append(":\n");
@@ -145,7 +147,8 @@ final class FxCoreFileTools {
 
         List<Path> candidates;
         try (Stream<Path> stream = Files.isRegularFile(root) ? Stream.of(root) : Files.walk(root)) {
-            candidates = stream.filter(Files::isRegularFile).filter(path -> !FxIgnoredPaths.contains(root, path)).limit(MAX_SCAN_FILES + 1L).toList();
+            candidates = stream.filter(Files::isRegularFile).filter(path -> !FxIgnoredPaths.contains(root, path))
+                    .limit(MAX_SCAN_FILES + 1L).collect(Collectors.toList());
         }
         List<Match> matches = new ArrayList<>();
         String needle = caseInsensitive ? pattern.toLowerCase(Locale.ROOT) : pattern;
@@ -356,7 +359,45 @@ final class FxCoreFileTools {
         return line.length() <= 2_000 ? line : line.substring(0, 2_000) + "...";
     }
 
-    private record Match(String path, int line, String text, String[] lines) {
+    private static final class Match {
+        private final String path;
+        private final int line;
+        private final String text;
+        private final String[] lines;
+
+        Match(String path, int line, String text, String[] lines) {
+            this.path = path;
+            this.line = line;
+            this.text = text;
+            this.lines = lines;
+        }
+
+        public String path() { return path; }
+        public int line() { return line; }
+        public String text() { return text; }
+        public String[] lines() { return lines; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof Match)) return false;
+            Match that = (Match) other;
+            return line == that.line && Objects.equals(path, that.path)
+                    && Objects.equals(text, that.text) && Objects.equals(lines, that.lines);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(path);
+            result = 31 * result + Integer.hashCode(line);
+            result = 31 * result + Objects.hashCode(text);
+            return 31 * result + Objects.hashCode(lines);
+        }
+
+        @Override
+        public String toString() {
+            return "Match[path=" + path + ", line=" + line + ", text=" + text + ", lines=" + lines + "]";
+        }
     }
 
     @FunctionalInterface

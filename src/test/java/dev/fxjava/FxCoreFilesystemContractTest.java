@@ -142,8 +142,8 @@ class FxCoreFilesystemContractTest {
         for (int index = 0; index < fields.length; index += 2) {
             String name = (String) fields[index];
             Object value = fields[index + 1];
-            if (value instanceof Integer number) result.put(name, number);
-            else if (value instanceof Boolean bool) result.put(name, bool);
+            if (value instanceof Integer) result.put(name, (Integer) value);
+            else if (value instanceof Boolean) result.put(name, (Boolean) value);
             else result.put(name, (String) value);
         }
         return result;

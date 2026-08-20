@@ -58,12 +58,13 @@ final class MemoryTool implements Tool {
     public String execute(JsonNode arguments) throws Exception {
         validateShape(arguments);
         String action = arguments.path("action").asText();
-        return switch (action) {
-            case "save" -> save(arguments);
-            case "list" -> list();
-            case "clear" -> clear();
-            default -> throw new IllegalArgumentException("memory field \"action\" must be one of: save, list, clear");
-        };
+        switch (action) {
+            case "save": return save(arguments);
+            case "list": return list();
+            case "clear": return clear();
+            default:
+                throw new IllegalArgumentException("memory field \"action\" must be one of: save, list, clear");
+        }
     }
 
     private String save(JsonNode arguments) throws IOException {

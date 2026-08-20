@@ -15,6 +15,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -38,7 +39,8 @@ class OpenAiResponsesRetryTest {
         assertEquals(List.of(250L, 1_000L, 2_000L, 4_000L, 8_000L, 16_000L,
                         30_000L, 30_000L, 30_000L),
                 java.util.stream.IntStream.rangeClosed(1, 9)
-                        .mapToObj(attempt -> OpenAiResponsesClient.retryDelayMillis(null, attempt)).toList());
+                        .mapToObj(attempt -> OpenAiResponsesClient.retryDelayMillis(null, attempt))
+                        .collect(Collectors.toList()));
         assertEquals(2_000, OpenAiResponsesClient.retryDelayMillis("2", 1));
         assertEquals(30_000, OpenAiResponsesClient.retryDelayMillis("999999999999999999999", 1));
         assertEquals(1_000, OpenAiResponsesClient.retryDelayMillis("later", 2));

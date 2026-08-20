@@ -21,8 +21,10 @@ import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /** The compact remainder of fx's filesystem tool surface. */
@@ -196,12 +198,15 @@ final class FxFileTools {
     private static String semanticSearch(WorkspaceTools.Workspace workspace, JsonNode args) throws IOException {
         String query = requiredText(args, "query");
         List<String> keywords = Stream.of(query.toLowerCase(Locale.ROOT).split("[^\\p{L}\\p{N}_]+"))
-                .filter(word -> word.length() > 1).filter(word -> !STOP_WORDS.contains(word)).distinct().limit(16).toList();
+                .filter(word -> word.length() > 1).filter(word -> !STOP_WORDS.contains(word)).distinct().limit(16)
+                .collect(Collectors.toList());
         if (keywords.isEmpty()) return "[search] empty query\n";
         Path root = workspace.resolveExisting(optionalText(args, "path", "."));
         List<SearchHit> hits = new ArrayList<>();
         try (Stream<Path> stream = Files.isRegularFile(root) ? Stream.of(root) : Files.walk(root)) {
-            for (Path file : stream.filter(Files::isRegularFile).filter(path -> !FxIgnoredPaths.contains(root, path)).limit(2_000).toList()) {
+            for (Path file : stream.filter(Files::isRegularFile)
+                    .filter(path -> !FxIgnoredPaths.contains(root, path)).limit(2_000)
+                    .collect(Collectors.toList())) {
                 if (Files.size(file) > MAX_READ_BYTES * 2L) continue;
                 String content;
                 try {
@@ -316,7 +321,46 @@ final class FxFileTools {
         return value.length() <= maximum ? value : value.substring(0, maximum);
     }
 
-    private record SearchHit(String path, int score, int line, String sample) {
+    private static final class SearchHit {
+        private final String path;
+        private final int score;
+        private final int line;
+        private final String sample;
+
+        SearchHit(String path, int score, int line, String sample) {
+            this.path = path;
+            this.score = score;
+            this.line = line;
+            this.sample = sample;
+        }
+
+        public String path() { return path; }
+        public int score() { return score; }
+        public int line() { return line; }
+        public String sample() { return sample; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof SearchHit)) return false;
+            SearchHit that = (SearchHit) other;
+            return score == that.score && line == that.line && Objects.equals(path, that.path)
+                    && Objects.equals(sample, that.sample);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(path);
+            result = 31 * result + Integer.hashCode(score);
+            result = 31 * result + Integer.hashCode(line);
+            return 31 * result + Objects.hashCode(sample);
+        }
+
+        @Override
+        public String toString() {
+            return "SearchHit[path=" + path + ", score=" + score + ", line=" + line
+                    + ", sample=" + sample + "]";
+        }
     }
 
     @FunctionalInterface

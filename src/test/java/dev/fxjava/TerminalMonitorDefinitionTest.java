@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 
+import java.util.Set;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -18,10 +20,8 @@ class TerminalMonitorDefinitionTest {
                 "output_matches", "output_quiet", "screen_matches", "tcp_ready", "http_ready",
                 "path_exists", "path_changed", "path_size", "custom_probe"}) {
             ObjectNode definition = definition(condition(kind));
-            boolean polling = switch (kind) {
-                case "tcp_ready", "http_ready", "path_exists", "path_changed", "path_size", "custom_probe" -> true;
-                default -> false;
-            };
+            boolean polling = Set.of("tcp_ready", "http_ready", "path_exists", "path_changed",
+                    "path_size", "custom_probe").contains(kind);
             if (polling) definition.put("check_interval_ms", 10);
             var parsed = TerminalMonitorDefinition.parse(definition);
             assertEquals(kind, parsed.condition().kind());
@@ -68,16 +68,38 @@ class TerminalMonitorDefinitionTest {
     private ObjectNode condition(String kind) {
         ObjectNode result = json.createObjectNode().put("kind", kind);
         switch (kind) {
-            case "exit_code" -> result.put("exit_code", 7);
-            case "signal" -> result.put("signal", "terminate");
-            case "output_contains", "output_matches", "screen_matches" -> result.put("pattern", "ready");
-            case "output_quiet" -> result.put("duration_ms", 10);
-            case "tcp_ready" -> result.put("host", "127.0.0.1").put("port", 3000);
-            case "http_ready" -> result.put("pattern", "http://127.0.0.1/ready");
-            case "path_exists", "path_changed" -> result.put("path", "ready.txt");
-            case "path_size" -> result.put("path", "ready.txt").put("minimum_bytes", 1);
-            case "custom_probe" -> result.put("command", "echo ready").put("cwd", ".");
-            default -> { }
+            case "exit_code":
+                result.put("exit_code", 7);
+                break;
+            case "signal":
+                result.put("signal", "terminate");
+                break;
+            case "output_contains":
+            case "output_matches":
+            case "screen_matches":
+                result.put("pattern", "ready");
+                break;
+            case "output_quiet":
+                result.put("duration_ms", 10);
+                break;
+            case "tcp_ready":
+                result.put("host", "127.0.0.1").put("port", 3000);
+                break;
+            case "http_ready":
+                result.put("pattern", "http://127.0.0.1/ready");
+                break;
+            case "path_exists":
+            case "path_changed":
+                result.put("path", "ready.txt");
+                break;
+            case "path_size":
+                result.put("path", "ready.txt").put("minimum_bytes", 1);
+                break;
+            case "custom_probe":
+                result.put("command", "echo ready").put("cwd", ".");
+                break;
+            default:
+                break;
         }
         return result;
     }

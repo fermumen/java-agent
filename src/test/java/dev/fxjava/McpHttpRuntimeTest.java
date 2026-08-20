@@ -147,27 +147,30 @@ class McpHttpRuntimeTest {
             ObjectNode response = json.createObjectNode().put("jsonrpc", "2.0");
             response.set("id", request.get("id").deepCopy());
             switch (method) {
-                case "initialize" -> {
+                case "initialize":
                     response.putObject("result").put("protocolVersion", "2025-06-18")
                             .putObject("capabilities").putObject("tools");
                     if (issueSession) exchange.getResponseHeaders().add("Mcp-Session-Id", "session-1");
                     send(exchange, json.writeValueAsString(response), "application/json");
-                }
-                case "tools/list" -> {
+                    break;
+                case "tools/list": {
                     ObjectNode tool = response.putObject("result").putArray("tools").addObject();
                     tool.put("name", "remote.echo").put("description", "Remote echo");
                     tool.putObject("annotations").put("readOnlyHint", true);
                     tool.putObject("inputSchema").put("type", "object");
                     send(exchange, "data: " + json.writeValueAsString(response) + "\n\n", "text/event-stream");
+                    break;
                 }
-                case "tools/call" -> {
+                case "tools/call": {
                     String value = request.path("params").path("arguments").path("value").asText();
                     response.putObject("result").putArray("content").addObject()
                             .put("type", "text").put("text", "remote:" + value);
                     if (heldOpen) sendHeldOpen(exchange, response);
                     else send(exchange, json.writeValueAsString(response), "application/json; charset=utf-8");
+                    break;
                 }
-                default -> throw new IOException("Unexpected method: " + method);
+                default:
+                    throw new IOException("Unexpected method: " + method);
             }
         }
 

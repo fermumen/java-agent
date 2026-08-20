@@ -98,13 +98,19 @@ class McpHttpListenerTest {
 
         private void handle(HttpExchange exchange) throws IOException {
             switch (exchange.getRequestMethod()) {
-                case "GET" -> listen(exchange);
-                case "DELETE" -> delete(exchange);
-                case "POST" -> post(exchange);
-                default -> {
+                case "GET":
+                    listen(exchange);
+                    break;
+                case "DELETE":
+                    delete(exchange);
+                    break;
+                case "POST":
+                    post(exchange);
+                    break;
+                default:
                     exchange.sendResponseHeaders(405, -1);
                     exchange.close();
-                }
+                    break;
             }
         }
 
@@ -152,24 +158,28 @@ class McpHttpListenerTest {
             ObjectNode response = json.createObjectNode().put("jsonrpc", "2.0");
             response.set("id", request.get("id").deepCopy());
             switch (method) {
-                case "initialize" -> {
+                case "initialize":
                     initializeCalls.incrementAndGet();
                     response.putObject("result").put("protocolVersion", "2025-06-18")
                             .putObject("capabilities").putObject("tools").put("listChanged", true);
                     exchange.getResponseHeaders().add("Mcp-Session-Id", "session-listener");
-                }
-                case "tools/list" -> {
+                    break;
+                case "tools/list": {
                     int call = toolsListCalls.incrementAndGet();
                     ObjectNode tool = response.putObject("result").putArray("tools").addObject();
                     tool.put("name", currentTool).put("description", "Changing tool");
                     tool.putObject("annotations").put("readOnlyHint", true);
                     tool.putObject("inputSchema").put("type", "object");
                     if (call == 1) firstList.countDown();
+                    break;
                 }
-                case "tools/call" -> response.putObject("result").putArray("content").addObject()
-                        .put("type", "text").put("text", request.path("params").path("name").asText()
-                                + ":" + request.path("params").path("arguments").path("text").asText());
-                default -> throw new IOException("Unexpected method: " + method);
+                case "tools/call":
+                    response.putObject("result").putArray("content").addObject()
+                            .put("type", "text").put("text", request.path("params").path("name").asText()
+                                    + ":" + request.path("params").path("arguments").path("text").asText());
+                    break;
+                default:
+                    throw new IOException("Unexpected method: " + method);
             }
             byte[] body = json.writeValueAsBytes(response);
             exchange.getResponseHeaders().add("Content-Type", "application/json");

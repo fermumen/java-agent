@@ -5,12 +5,44 @@ import com.fasterxml.jackson.databind.JsonNode;
 import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.Base64;
+import java.util.Objects;
 
 /** Shared bounds for untrusted MCP schemas and tool results. */
 final class McpValidation {
     private static final int MAX_DEPTH = 64;
     private static final int MAX_NODES = 20_000;
     private static final int MAX_CONTENT_ITEMS = 256;
+
+    private static final class Entry {
+        private final JsonNode node;
+        private final int depth;
+
+        private Entry(JsonNode node, int depth) {
+            this.node = node;
+            this.depth = depth;
+        }
+
+        public JsonNode node() { return node; }
+        public int depth() { return depth; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (other == null || getClass() != other.getClass()) return false;
+            Entry that = (Entry) other;
+            return depth == that.depth && Objects.equals(node, that.node);
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * Objects.hashCode(node) + Integer.hashCode(depth);
+        }
+
+        @Override
+        public String toString() {
+            return "Entry[node=" + node + ", depth=" + depth + "]";
+        }
+    }
 
     private McpValidation() { }
 
@@ -38,8 +70,11 @@ final class McpValidation {
         if (!item.isObject()) throw new IOException("MCP content item must be an object");
         String type = item.path("type").asText();
         switch (type) {
-            case "text" -> requireText(item, "text");
-            case "image", "audio" -> {
+            case "text":
+                requireText(item, "text");
+                break;
+            case "image":
+            case "audio": {
                 String data = requireText(item, "data");
                 requireText(item, "mimeType");
                 try {
@@ -47,13 +82,17 @@ final class McpValidation {
                 } catch (IllegalArgumentException invalid) {
                     throw new IOException("MCP media content has invalid base64", invalid);
                 }
+                break;
             }
-            case "resource_link" -> {
+            case "resource_link":
                 requireText(item, "uri");
                 requireText(item, "name");
-            }
-            case "resource" -> validateResource(item.path("resource"));
-            default -> throw new IOException("Unsupported MCP content type: " + type);
+                break;
+            case "resource":
+                validateResource(item.path("resource"));
+                break;
+            default:
+                throw new IOException("Unsupported MCP content type: " + type);
         }
         walk(item, false);
     }
@@ -80,7 +119,6 @@ final class McpValidation {
     }
 
     private static void walk(JsonNode root, boolean rejectExternalRefs) throws IOException {
-        record Entry(JsonNode node, int depth) { }
         ArrayDeque<Entry> pending = new ArrayDeque<>();
         pending.push(new Entry(root, 0));
         int nodes = 0;

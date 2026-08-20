@@ -22,13 +22,17 @@ final class SkillsCommand {
         String value = separator < 0 ? "" : rest.substring(separator + 1).trim();
         result.put("action", action).put("managed_root", manager.root().toString());
         switch (action) {
-            case "list" -> list(result, workspace, stateRoot, manager);
-            case "path" -> { }
-            case "create" -> {
+            case "list":
+                list(result, workspace, stateRoot, manager);
+                break;
+            case "path":
+                break;
+            case "create": {
                 Path file = manager.create(value);
                 result.put("path", file.toString()).put("reload", true);
+                break;
             }
-            case "remove" -> {
+            case "remove": {
                 SkillTool.Skill selected = SkillTool.inventory(workspace, stateRoot).stream()
                         .filter(skill -> skill.name().equals(value)).findFirst()
                         .orElseThrow(() -> new IOException("Skill not found: " + value));
@@ -37,12 +41,19 @@ final class SkillsCommand {
                 }
                 manager.remove(selected.directory().getFileName().toString());
                 result.put("removed", value).put("reload", true);
+                break;
             }
-            case "show" -> result.put("name", value).put("content",
-                    SkillTool.create(workspace, stateRoot).execute(json.createObjectNode().put("name", value)));
-            case "add", "install" -> install(result, value, workspace, stateRoot, json);
-            default -> throw new IllegalArgumentException(
-                    "Usage: skills [list|add|install|show|create|remove|path] [name|path]");
+            case "show":
+                result.put("name", value).put("content",
+                        SkillTool.create(workspace, stateRoot).execute(json.createObjectNode().put("name", value)));
+                break;
+            case "add":
+            case "install":
+                install(result, value, workspace, stateRoot, json);
+                break;
+            default:
+                throw new IllegalArgumentException(
+                        "Usage: skills [list|add|install|show|create|remove|path] [name|path]");
         }
     }
 

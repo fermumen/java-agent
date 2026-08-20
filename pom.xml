@@ -11,7 +11,7 @@
   <description>A small, dependency-light coding agent harness for the JVM.</description>
 
   <properties>
-    <maven.compiler.release>17</maven.compiler.release>
+    <maven.compiler.release>11</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <jackson.version>2.20.0</jackson.version>
     <junit.version>5.13.4</junit.version>

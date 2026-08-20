@@ -130,7 +130,7 @@ class FxFilesystemEdgeParityTest {
         for (int index = 0; index < fields.length; index += 2) {
             String field = (String) fields[index];
             Object value = fields[index + 1];
-            if (value instanceof Integer number) result.put(field, number);
+            if (value instanceof Integer) result.put(field, (Integer) value);
             else result.put(field, (String) value);
         }
         return result;

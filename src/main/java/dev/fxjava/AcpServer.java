@@ -15,6 +15,7 @@ import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -118,15 +119,33 @@ final class AcpServer {
         }
         try {
             switch (method) {
-                case "session/new" -> newSession(id, params);
-                case "session/load" -> loadSession(id, params, false);
-                case "session/resume" -> loadSession(id, params, true);
-                case "session/close" -> closeSession(id, params);
-                case "session/list" -> listSessions(id);
-                case "session/prompt" -> startPrompt(id, params);
-                case "session/set_mode" -> setMode(id, params);
-                case "session/set_config_option" -> setConfig(id, params);
-                default -> error(id, -32601, "Method not found");
+                case "session/new":
+                    newSession(id, params);
+                    break;
+                case "session/load":
+                    loadSession(id, params, false);
+                    break;
+                case "session/resume":
+                    loadSession(id, params, true);
+                    break;
+                case "session/close":
+                    closeSession(id, params);
+                    break;
+                case "session/list":
+                    listSessions(id);
+                    break;
+                case "session/prompt":
+                    startPrompt(id, params);
+                    break;
+                case "session/set_mode":
+                    setMode(id, params);
+                    break;
+                case "session/set_config_option":
+                    setConfig(id, params);
+                    break;
+                default:
+                    error(id, -32601, "Method not found");
+                    break;
             }
         } catch (IllegalArgumentException invalid) {
             error(id, -32602, safeMessage(invalid));
@@ -440,8 +459,8 @@ final class AcpServer {
 
     private static String safeMessage(Exception error) {
         String message = error.getMessage();
-        if (error instanceof PromptWriteFailure && error.getCause() instanceof Exception cause) {
-            message = cause.getMessage();
+        if (error instanceof PromptWriteFailure && error.getCause() instanceof Exception) {
+            message = ((Exception) error.getCause()).getMessage();
         }
         return message == null || message.isBlank() ? error.getClass().getSimpleName() : message;
     }
@@ -465,7 +484,44 @@ final class AcpServer {
         @Override void close() throws Exception;
     }
 
-    record SessionSummary(String id, String cwd, Instant updatedAt) { }
+    static final class SessionSummary {
+        private final String id;
+        private final String cwd;
+        private final Instant updatedAt;
+
+        SessionSummary(String id, String cwd, Instant updatedAt) {
+            this.id = id;
+            this.cwd = cwd;
+            this.updatedAt = updatedAt;
+        }
+
+        public String id() { return id; }
+        public String cwd() { return cwd; }
+        public Instant updatedAt() { return updatedAt; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (other == null || getClass() != other.getClass()) return false;
+            SessionSummary that = (SessionSummary) other;
+            return Objects.equals(id, that.id)
+                    && Objects.equals(cwd, that.cwd)
+                    && Objects.equals(updatedAt, that.updatedAt);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(id);
+            result = 31 * result + Objects.hashCode(cwd);
+            result = 31 * result + Objects.hashCode(updatedAt);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "SessionSummary[id=" + id + ", cwd=" + cwd + ", updatedAt=" + updatedAt + "]";
+        }
+    }
 
     private static final class ActivePrompt {
         final JsonNode id;
@@ -475,7 +531,36 @@ final class AcpServer {
         ActivePrompt(JsonNode id, String sessionId) { this.id = id.deepCopy(); this.sessionId = sessionId; }
     }
 
-    private record Frame(byte[] bytes, boolean overflow) { }
+    private static final class Frame {
+        private final byte[] bytes;
+        private final boolean overflow;
+
+        private Frame(byte[] bytes, boolean overflow) {
+            this.bytes = bytes;
+            this.overflow = overflow;
+        }
+
+        public byte[] bytes() { return bytes; }
+        public boolean overflow() { return overflow; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (other == null || getClass() != other.getClass()) return false;
+            Frame that = (Frame) other;
+            return overflow == that.overflow && Objects.equals(bytes, that.bytes);
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * Objects.hashCode(bytes) + Boolean.hashCode(overflow);
+        }
+
+        @Override
+        public String toString() {
+            return "Frame[bytes=" + bytes + ", overflow=" + overflow + "]";
+        }
+    }
 
     private static final class FrameReader {
         private final BufferedInputStream input;

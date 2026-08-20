@@ -1,5 +1,7 @@
 package dev.fxjava;
 
+import com.fasterxml.jackson.databind.JsonNode;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
@@ -10,10 +12,15 @@ import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /** Session-scoped sidecar store for fx-compatible large tool-result previews. */
 final class ToolResultStore {
@@ -22,8 +29,11 @@ final class ToolResultStore {
     static final int READ_DEFAULT_BYTES = 8 * 1024;
     static final int READ_MAX_BYTES = 64 * 1024;
     private static final int STORED_MAX_BYTES = 8 * 1024 * 1024;
+    private static final int MAX_REFERENCES = 512;
     private static final Pattern HANDLE = Pattern.compile(
             "result-[A-Za-z0-9_-]{1,48}-([0-9a-f]{16})-([0-9a-f]{16})\\.txt");
+    private static final Pattern HANDLE_REFERENCE = Pattern.compile(
+            "<tool_result_handle>(result-[A-Za-z0-9_-]{1,48}-[0-9a-f]{16}-[0-9a-f]{16}\\.txt)</tool_result_handle>");
 
     private final Path sessionRoot;
     private final Map<String, byte[]> ephemeral = new LinkedHashMap<>();
@@ -73,22 +83,29 @@ final class ToolResultStore {
                 + text + "\n</tool_result>";
     }
 
-    static void copySidecars(Path sourceSession, Path targetSession) throws IOException {
+    static List<String> referencedHandles(JsonNode input) throws IOException {
+        Set<String> references = new LinkedHashSet<>();
+        collectReferences(input, references);
+        return references.stream().sorted().collect(Collectors.toUnmodifiableList());
+    }
+
+    static void verifySidecars(Path session, Collection<String> handles) throws IOException {
+        for (String handle : handles) verifySidecar(session, validate(handle));
+    }
+
+    static void copySidecars(Path sourceSession, Path targetSession,
+                             Collection<String> handles) throws IOException {
+        if (handles.isEmpty()) return;
         Path source = sourceSession.resolve("tool-results");
-        if (!Files.exists(source, LinkOption.NOFOLLOW_LINKS)) return;
         rejectDirectory(source);
         Path target = targetSession.resolve("tool-results");
         Files.createDirectories(target);
         rejectDirectory(target);
-        try (var files = Files.newDirectoryStream(source)) {
-            for (Path file : files) {
-                String name = file.getFileName().toString();
-                validate(name);
-                if (Files.isSymbolicLink(file) || !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
-                    throw new IOException("unsafe tool-result sidecar: " + name);
-                }
-                Files.copy(file, target.resolve(name), StandardCopyOption.REPLACE_EXISTING);
-            }
+        for (String rawHandle : handles) {
+            String handle = validate(rawHandle);
+            Path file = verifySidecar(sourceSession, handle);
+            Files.copy(file, target.resolve(handle), StandardCopyOption.REPLACE_EXISTING);
+            verifySidecar(targetSession, handle);
         }
     }
 
@@ -198,9 +215,43 @@ final class ToolResultStore {
         }
     }
 
+    private static Path verifySidecar(Path session, String handle) throws IOException {
+        Path directory = session.resolve("tool-results");
+        if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("Missing session tool result: " + handle);
+        }
+        rejectDirectory(directory);
+        Path file = directory.resolve(handle);
+        if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("Missing session tool result: " + handle);
+        }
+        if (Files.isSymbolicLink(file) || !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)
+                || Files.size(file) > STORED_MAX_BYTES) {
+            throw new IOException("unsafe tool-result sidecar: " + handle);
+        }
+        verifyDigest(handle, Files.readAllBytes(file));
+        return file;
+    }
+
+    private static void collectReferences(JsonNode node, Set<String> references) throws IOException {
+        if (node.isTextual()) {
+            Matcher matcher = HANDLE_REFERENCE.matcher(node.asText());
+            while (matcher.find()) {
+                String handle = validate(matcher.group(1));
+                if (references.add(handle) && references.size() > MAX_REFERENCES) {
+                    throw new IOException("Session contains too many tool-result references");
+                }
+            }
+            return;
+        }
+        if (node.isContainerNode()) {
+            for (JsonNode child : node) collectReferences(child, references);
+        }
+    }
+
     private static String digest(byte[] bytes) {
         try {
-            return java.util.HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+            return Hex.encode(MessageDigest.getInstance("SHA-256").digest(bytes));
         } catch (NoSuchAlgorithmException impossible) {
             throw new IllegalStateException(impossible);
         }

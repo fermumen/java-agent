@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /** Atomic bounded installer for local FX-compatible skill directories. */
 final class InstallSkillTool implements Tool {
@@ -61,7 +62,9 @@ final class InstallSkillTool implements Tool {
         }
         source = source.toRealPath();
         List<SkillTool.Skill> found = discover(source);
-        if (!filter.isBlank()) found = found.stream().filter(skill -> skill.name().equals(filter)).toList();
+        if (!filter.isBlank()) {
+            found = found.stream().filter(skill -> skill.name().equals(filter)).collect(Collectors.toList());
+        }
         if (found.isEmpty()) throw new IOException("No matching skills found in local source: " + source);
         if (found.size() != 1) throw new IOException("Multiple skills found; provide the exact skill field");
         SkillTool.Skill skill = found.get(0);
@@ -89,7 +92,8 @@ final class InstallSkillTool implements Tool {
     private static List<SkillTool.Skill> discover(Path source) throws IOException {
         List<SkillTool.Skill> found = new ArrayList<>();
         try (var paths = Files.walk(source, 5)) {
-            for (Path file : paths.filter(path -> path.getFileName().toString().equals("SKILL.md")).sorted().toList()) {
+            for (Path file : paths.filter(path -> path.getFileName().toString().equals("SKILL.md"))
+                    .sorted().collect(Collectors.toList())) {
                 if (Files.isSymbolicLink(file) || Files.isSymbolicLink(file.getParent())
                         || !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) continue;
                 SkillTool.Skill skill = SkillTool.metadata(file.getParent().toRealPath(), file);
@@ -116,7 +120,7 @@ final class InstallSkillTool implements Tool {
         int files = 0;
         long bytes = 0;
         try (var paths = Files.walk(source)) {
-            for (Path path : paths.sorted().toList()) {
+            for (Path path : paths.sorted().collect(Collectors.toList())) {
                 if (Files.isSymbolicLink(path)) throw new IOException("Skills containing symlinks cannot be installed");
                 Path relative = source.relativize(path);
                 Path destination = target.resolve(relative).normalize();
@@ -138,7 +142,9 @@ final class InstallSkillTool implements Tool {
     private static void deleteTree(Path root) {
         if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) return;
         try (var paths = Files.walk(root)) {
-            for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) Files.deleteIfExists(path);
+            for (Path path : paths.sorted(Comparator.reverseOrder()).collect(Collectors.toList())) {
+                Files.deleteIfExists(path);
+            }
         } catch (IOException ignored) { }
     }
 }

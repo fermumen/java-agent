@@ -14,6 +14,8 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -49,7 +51,7 @@ class MainAcpStartupParityTest {
         List<JsonNode> responses = Arrays.stream(result.stdout.split("\\R"))
                 .filter(line -> !line.isBlank()).map(line -> {
                     try { return json.readTree(line); } catch (Exception failure) { throw new RuntimeException(failure); }
-                }).toList();
+                }).collect(Collectors.toUnmodifiableList());
         assertEquals(2, responses.size());
         assertTrue(responses.get(1).path("result").path("sessions").isArray());
         assertEquals(0, responses.get(1).path("result").path("sessions").size());
@@ -72,5 +74,42 @@ class MainAcpStartupParityTest {
                 + "\",\"params\":" + params + "}";
     }
 
-    private record Result(int code, String stdout, String stderr) { }
+    private static final class Result {
+        private final int code;
+        private final String stdout;
+        private final String stderr;
+
+        private Result(int code, String stdout, String stderr) {
+            this.code = code;
+            this.stdout = stdout;
+            this.stderr = stderr;
+        }
+
+        public int code() { return code; }
+        public String stdout() { return stdout; }
+        public String stderr() { return stderr; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (other == null || getClass() != other.getClass()) return false;
+            Result that = (Result) other;
+            return code == that.code
+                    && Objects.equals(stdout, that.stdout)
+                    && Objects.equals(stderr, that.stderr);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Integer.hashCode(code);
+            result = 31 * result + Objects.hashCode(stdout);
+            result = 31 * result + Objects.hashCode(stderr);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "Result[code=" + code + ", stdout=" + stdout + ", stderr=" + stderr + "]";
+        }
+    }
 }

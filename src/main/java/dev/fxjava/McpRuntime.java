@@ -27,12 +27,14 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
 
 /** Compact bounded MCP stdio and Streamable HTTP client. */
 final class McpRuntime implements AutoCloseable {
@@ -61,7 +63,7 @@ final class McpRuntime implements AutoCloseable {
         catalog.addAll(tools);
         this.tools = List.copyOf(catalog);
         this.remoteTools = tools.stream().filter(McpTool.class::isInstance)
-                .map(McpTool.class::cast).toList();
+                .map(McpTool.class::cast).collect(Collectors.toUnmodifiableList());
         this.configPath = configPath;
         this.tolerateRequired = tolerateRequired;
         this.configFingerprint = configFingerprint;
@@ -125,7 +127,7 @@ final class McpRuntime implements AutoCloseable {
                     health.add(new HealthEntry(config.name(), config.type(), config.required(),
                             "failed", safeHealthError(startupFailure), null));
                     if (config.required() && !tolerateRequired) {
-                        if (startupFailure instanceof IOException io) throw io;
+                        if (startupFailure instanceof IOException) throw (IOException) startupFailure;
                         throw new IOException("Required MCP server failed: " + config.name(), startupFailure);
                     }
                 }
@@ -134,7 +136,7 @@ final class McpRuntime implements AutoCloseable {
                     configPath, tolerateRequired, fingerprint);
         } catch (Exception failure) {
             for (Server server : servers) server.close();
-            if (failure instanceof IOException io) throw io;
+            if (failure instanceof IOException) throw (IOException) failure;
             throw new IOException("Could not start MCP runtime", failure);
         }
     }
@@ -201,11 +203,118 @@ final class McpRuntime implements AutoCloseable {
         return message.length() <= 300 ? message : message.substring(0, 300) + "...";
     }
 
-    private record HealthEntry(String name, String transport, boolean required,
-                               String connection, String error, Server server) { }
+    private static final class HealthEntry {
+        private final String name;
+        private final String transport;
+        private final boolean required;
+        private final String connection;
+        private final String error;
+        private final Server server;
 
-    record McpToolInfo(String publicName, String server, String remoteName, String description,
-                       ObjectNode schema, boolean readOnly) { }
+        private HealthEntry(String name, String transport, boolean required,
+                            String connection, String error, Server server) {
+            this.name = name;
+            this.transport = transport;
+            this.required = required;
+            this.connection = connection;
+            this.error = error;
+            this.server = server;
+        }
+
+        public String name() { return name; }
+        public String transport() { return transport; }
+        public boolean required() { return required; }
+        public String connection() { return connection; }
+        public String error() { return error; }
+        public Server server() { return server; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (other == null || getClass() != other.getClass()) return false;
+            HealthEntry that = (HealthEntry) other;
+            return required == that.required
+                    && Objects.equals(name, that.name)
+                    && Objects.equals(transport, that.transport)
+                    && Objects.equals(connection, that.connection)
+                    && Objects.equals(error, that.error)
+                    && Objects.equals(server, that.server);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(name);
+            result = 31 * result + Objects.hashCode(transport);
+            result = 31 * result + Boolean.hashCode(required);
+            result = 31 * result + Objects.hashCode(connection);
+            result = 31 * result + Objects.hashCode(error);
+            result = 31 * result + Objects.hashCode(server);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "HealthEntry[name=" + name + ", transport=" + transport + ", required=" + required
+                    + ", connection=" + connection + ", error=" + error + ", server=" + server + "]";
+        }
+    }
+
+    static final class McpToolInfo {
+        private final String publicName;
+        private final String server;
+        private final String remoteName;
+        private final String description;
+        private final ObjectNode schema;
+        private final boolean readOnly;
+
+        McpToolInfo(String publicName, String server, String remoteName, String description,
+                    ObjectNode schema, boolean readOnly) {
+            this.publicName = publicName;
+            this.server = server;
+            this.remoteName = remoteName;
+            this.description = description;
+            this.schema = schema;
+            this.readOnly = readOnly;
+        }
+
+        public String publicName() { return publicName; }
+        public String server() { return server; }
+        public String remoteName() { return remoteName; }
+        public String description() { return description; }
+        public ObjectNode schema() { return schema; }
+        public boolean readOnly() { return readOnly; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (other == null || getClass() != other.getClass()) return false;
+            McpToolInfo that = (McpToolInfo) other;
+            return readOnly == that.readOnly
+                    && Objects.equals(publicName, that.publicName)
+                    && Objects.equals(server, that.server)
+                    && Objects.equals(remoteName, that.remoteName)
+                    && Objects.equals(description, that.description)
+                    && Objects.equals(schema, that.schema);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(publicName);
+            result = 31 * result + Objects.hashCode(server);
+            result = 31 * result + Objects.hashCode(remoteName);
+            result = 31 * result + Objects.hashCode(description);
+            result = 31 * result + Objects.hashCode(schema);
+            result = 31 * result + Boolean.hashCode(readOnly);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "McpToolInfo[publicName=" + publicName + ", server=" + server + ", remoteName="
+                    + remoteName + ", description=" + description + ", schema=" + schema + ", readOnly="
+                    + readOnly + "]";
+        }
+    }
 
     ObjectMapper json() { return json; }
 
@@ -239,7 +348,8 @@ final class McpRuntime implements AutoCloseable {
 
     List<Tool> selectedTools() throws IOException {
         refreshChangedServers();
-        return remoteTools.stream().filter(tool -> tool.selected).map(Tool.class::cast).toList();
+        return remoteTools.stream().filter(tool -> tool.selected).map(Tool.class::cast)
+                .collect(Collectors.toUnmodifiableList());
     }
 
     private synchronized void refreshChangedServers() throws IOException {
@@ -295,8 +405,7 @@ final class McpRuntime implements AutoCloseable {
         byte[] bytes = Files.readAllBytes(path);
         if (bytes.length > MAX_CONFIG_BYTES) throw new IOException("MCP config exceeds 1 MiB");
         try {
-            return java.util.HexFormat.of().formatHex(
-                    MessageDigest.getInstance("SHA-256").digest(bytes));
+            return Hex.encode(MessageDigest.getInstance("SHA-256").digest(bytes));
         } catch (NoSuchAlgorithmException impossible) {
             throw new IllegalStateException(impossible);
         }
@@ -493,11 +602,129 @@ final class McpRuntime implements AutoCloseable {
         return value;
     }
 
-    private record ServerConfig(String name, String type, List<String> command, String url, Map<String, String> headers,
-                                Map<String, String> environment,
-                                boolean enabled, boolean required, int startupTimeoutMs, int operationTimeoutMs) { }
+    private static final class ServerConfig {
+        private final String name;
+        private final String type;
+        private final List<String> command;
+        private final String url;
+        private final Map<String, String> headers;
+        private final Map<String, String> environment;
+        private final boolean enabled;
+        private final boolean required;
+        private final int startupTimeoutMs;
+        private final int operationTimeoutMs;
 
-    private record RemoteTool(String name, String description, ObjectNode inputSchema, boolean readOnly) { }
+        private ServerConfig(String name, String type, List<String> command, String url,
+                             Map<String, String> headers, Map<String, String> environment,
+                             boolean enabled, boolean required, int startupTimeoutMs, int operationTimeoutMs) {
+            this.name = name;
+            this.type = type;
+            this.command = command;
+            this.url = url;
+            this.headers = headers;
+            this.environment = environment;
+            this.enabled = enabled;
+            this.required = required;
+            this.startupTimeoutMs = startupTimeoutMs;
+            this.operationTimeoutMs = operationTimeoutMs;
+        }
+
+        public String name() { return name; }
+        public String type() { return type; }
+        public List<String> command() { return command; }
+        public String url() { return url; }
+        public Map<String, String> headers() { return headers; }
+        public Map<String, String> environment() { return environment; }
+        public boolean enabled() { return enabled; }
+        public boolean required() { return required; }
+        public int startupTimeoutMs() { return startupTimeoutMs; }
+        public int operationTimeoutMs() { return operationTimeoutMs; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (other == null || getClass() != other.getClass()) return false;
+            ServerConfig that = (ServerConfig) other;
+            return enabled == that.enabled
+                    && required == that.required
+                    && startupTimeoutMs == that.startupTimeoutMs
+                    && operationTimeoutMs == that.operationTimeoutMs
+                    && Objects.equals(name, that.name)
+                    && Objects.equals(type, that.type)
+                    && Objects.equals(command, that.command)
+                    && Objects.equals(url, that.url)
+                    && Objects.equals(headers, that.headers)
+                    && Objects.equals(environment, that.environment);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(name);
+            result = 31 * result + Objects.hashCode(type);
+            result = 31 * result + Objects.hashCode(command);
+            result = 31 * result + Objects.hashCode(url);
+            result = 31 * result + Objects.hashCode(headers);
+            result = 31 * result + Objects.hashCode(environment);
+            result = 31 * result + Boolean.hashCode(enabled);
+            result = 31 * result + Boolean.hashCode(required);
+            result = 31 * result + Integer.hashCode(startupTimeoutMs);
+            result = 31 * result + Integer.hashCode(operationTimeoutMs);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "ServerConfig[name=" + name + ", type=" + type + ", command=" + command + ", url=" + url
+                    + ", headers=" + headers + ", environment=" + environment + ", enabled=" + enabled
+                    + ", required=" + required + ", startupTimeoutMs=" + startupTimeoutMs
+                    + ", operationTimeoutMs=" + operationTimeoutMs + "]";
+        }
+    }
+
+    private static final class RemoteTool {
+        private final String name;
+        private final String description;
+        private final ObjectNode inputSchema;
+        private final boolean readOnly;
+
+        private RemoteTool(String name, String description, ObjectNode inputSchema, boolean readOnly) {
+            this.name = name;
+            this.description = description;
+            this.inputSchema = inputSchema;
+            this.readOnly = readOnly;
+        }
+
+        public String name() { return name; }
+        public String description() { return description; }
+        public ObjectNode inputSchema() { return inputSchema; }
+        public boolean readOnly() { return readOnly; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (other == null || getClass() != other.getClass()) return false;
+            RemoteTool that = (RemoteTool) other;
+            return readOnly == that.readOnly
+                    && Objects.equals(name, that.name)
+                    && Objects.equals(description, that.description)
+                    && Objects.equals(inputSchema, that.inputSchema);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hashCode(name);
+            result = 31 * result + Objects.hashCode(description);
+            result = 31 * result + Objects.hashCode(inputSchema);
+            result = 31 * result + Boolean.hashCode(readOnly);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "RemoteTool[name=" + name + ", description=" + description + ", inputSchema=" + inputSchema
+                    + ", readOnly=" + readOnly + "]";
+        }
+    }
 
     private static final class McpTool implements Tool {
         private final Server server;
@@ -642,7 +869,8 @@ final class McpRuntime implements AutoCloseable {
                 }
                 JsonNode next = listed.get("nextCursor");
                 if (next == null || next.isNull()) return result.stream()
-                        .sorted((a, b) -> a.name().compareTo(b.name())).toList();
+                        .sorted((a, b) -> a.name().compareTo(b.name()))
+                        .collect(Collectors.toUnmodifiableList());
                 if (!next.isTextual() || !cursors.add(next.asText())) {
                     throw new IOException("MCP tools/list repeated or invalid cursor");
                 }
@@ -884,7 +1112,7 @@ final class McpRuntime implements AutoCloseable {
                 if (value.startsWith(" ")) value = value.substring(1);
                 if (field.equals("event")) kind = value;
                 if (field.equals("data")) {
-                    if (!data.isEmpty()) data.append("\n");
+                    if (data.length() > 0) data.append("\n");
                     data.append(value);
                     if (data.length() > MAX_LINE_BYTES) throw new IOException("MCP SSE event exceeds 2 MiB");
                 }
@@ -892,7 +1120,36 @@ final class McpRuntime implements AutoCloseable {
             return fields ? new SseEvent(kind, data.toString()) : null;
         }
 
-        private record SseEvent(String kind, String data) { }
+        private static final class SseEvent {
+            private final String kind;
+            private final String data;
+
+            private SseEvent(String kind, String data) {
+                this.kind = kind;
+                this.data = data;
+            }
+
+            public String kind() { return kind; }
+            public String data() { return data; }
+
+            @Override
+            public boolean equals(Object other) {
+                if (this == other) return true;
+                if (other == null || getClass() != other.getClass()) return false;
+                SseEvent that = (SseEvent) other;
+                return Objects.equals(kind, that.kind) && Objects.equals(data, that.data);
+            }
+
+            @Override
+            public int hashCode() {
+                return 31 * Objects.hashCode(kind) + Objects.hashCode(data);
+            }
+
+            @Override
+            public String toString() {
+                return "SseEvent[kind=" + kind + ", data=" + data + "]";
+            }
+        }
 
         private static final class SseInput {
             private final InputStream input;
@@ -991,7 +1248,7 @@ final class McpRuntime implements AutoCloseable {
             StringBuilder data = new StringBuilder();
             for (String line; (line = readSseLine(input)) != null;) {
                 if (line.isEmpty()) {
-                    if (!data.isEmpty()) {
+                    if (data.length() > 0) {
                         JsonNode envelope = json.readTree(data.toString());
                         if (envelope.path("id").canConvertToLong() && envelope.path("id").asLong() == id) {
                             return responsePayload(envelope, id, method);
@@ -999,7 +1256,7 @@ final class McpRuntime implements AutoCloseable {
                         data.setLength(0);
                     }
                 } else if (line.startsWith("data:")) {
-                    if (!data.isEmpty()) data.append("\n");
+                    if (data.length() > 0) data.append("\n");
                     String value = line.substring(5);
                     data.append(value.startsWith(" ") ? value.substring(1) : value);
                     if (data.length() > MAX_LINE_BYTES) throw new IOException("MCP SSE event exceeds 2 MiB");

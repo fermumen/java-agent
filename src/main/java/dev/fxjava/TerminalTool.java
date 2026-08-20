@@ -20,9 +20,11 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
 
 /**
  * Pure-Java implementation of fx's compact terminal action contract.
@@ -79,11 +81,16 @@ final class TerminalTool implements Tool {
     @Override
     public boolean requiresApproval(JsonNode arguments) throws Exception {
         String action = validate(arguments).path("action").asText();
-        return switch (action) {
-            case "read", "screen", "list" -> false;
-            case "inspect" -> arguments.hasNonNull("acknowledge_event_id");
-            default -> true;
-        };
+        switch (action) {
+            case "read":
+            case "screen":
+            case "list":
+                return false;
+            case "inspect":
+                return arguments.hasNonNull("acknowledge_event_id");
+            default:
+                return true;
+        }
     }
 
     @Override public boolean isErrorResult(String result) { return result.startsWith("{\"failure\":"); }
@@ -105,21 +112,34 @@ final class TerminalTool implements Tool {
     public String execute(JsonNode rawArguments) throws Exception {
         ObjectNode arguments = validate(rawArguments);
         String action = arguments.path("action").asText();
-        return switch (action) {
-            case "exec" -> executeCaptured(arguments);
-            case "start" -> start(arguments);
-            case "read" -> read(arguments);
-            case "screen" -> screen(arguments);
-            case "write" -> write(arguments);
-            case "wait" -> waitFor(arguments);
-            case "monitor" -> monitor(arguments);
-            case "inspect" -> inspect(arguments);
-            case "list" -> list(arguments);
-            case "resize" -> resize(arguments);
-            case "signal" -> signal(arguments);
-            case "close" -> close(arguments);
-            default -> throw new IllegalArgumentException("terminal arguments must match the advertised action schema");
-        };
+        switch (action) {
+            case "exec":
+                return executeCaptured(arguments);
+            case "start":
+                return start(arguments);
+            case "read":
+                return read(arguments);
+            case "screen":
+                return screen(arguments);
+            case "write":
+                return write(arguments);
+            case "wait":
+                return waitFor(arguments);
+            case "monitor":
+                return monitor(arguments);
+            case "inspect":
+                return inspect(arguments);
+            case "list":
+                return list(arguments);
+            case "resize":
+                return resize(arguments);
+            case "signal":
+                return signal(arguments);
+            case "close":
+                return close(arguments);
+            default:
+                throw new IllegalArgumentException("terminal arguments must match the advertised action schema");
+        }
     }
 
     private String executeCaptured(ObjectNode arguments) throws Exception {
@@ -296,9 +316,17 @@ final class TerminalTool implements Tool {
         TerminalSession session = session(text(arguments, "session_id"));
         String signal = text(arguments, "signal");
         switch (signal) {
-            case "kill" -> terminate(session, true);
-            case "hangup", "interrupt", "quit", "terminate" -> terminate(session, false);
-            default -> throw new IllegalArgumentException("terminal signal arguments are invalid: InvalidSignal");
+            case "kill":
+                terminate(session, true);
+                break;
+            case "hangup":
+            case "interrupt":
+            case "quit":
+            case "terminate":
+                terminate(session, false);
+                break;
+            default:
+                throw new IllegalArgumentException("terminal signal arguments are invalid: InvalidSignal");
         }
         session.lastSignal = signal;
         refreshMonitors(session);
@@ -325,7 +353,7 @@ final class TerminalTool implements Tool {
 
     private static void terminate(TerminalSession session, boolean force)
             throws IOException, InterruptedException {
-        List<ProcessHandle> descendants = session.process.descendants().toList();
+        List<ProcessHandle> descendants = session.process.descendants().collect(Collectors.toList());
         synchronized (session.stdin) {
             try { session.stdin.close(); } catch (IOException ignored) { }
         }
@@ -482,13 +510,17 @@ final class TerminalTool implements Tool {
         String kind = payload.path("kind").asText();
         String value;
         switch (kind) {
-            case "text", "paste" -> value = payload.path("text").asText("");
-            case "keys" -> {
+            case "text":
+            case "paste":
+                value = payload.path("text").asText("");
+                break;
+            case "keys": {
                 StringBuilder result = new StringBuilder();
                 for (JsonNode key : payload.path("keys")) result.append(keySequence(key.asText()));
                 value = result.toString();
+                break;
             }
-            case "controls" -> {
+            case "controls": {
                 ByteArrayOutputStream result = new ByteArrayOutputStream();
                 for (JsonNode control : payload.path("controls")) {
                     String character = control.asText();
@@ -501,34 +533,38 @@ final class TerminalTool implements Tool {
                 }
                 return result.toByteArray();
             }
-            default -> throw new IllegalArgumentException("invalid terminal write kind");
+            default:
+                throw new IllegalArgumentException("invalid terminal write kind");
         }
         return value.getBytes(StandardCharsets.UTF_8);
     }
 
     private static String keySequence(String key) {
-        return switch (key) {
-            case "enter" -> "\n";
-            case "tab" -> "\t";
-            case "escape" -> "\u001b";
-            case "backspace" -> "\b";
-            case "delete" -> "\u001b[3~";
-            case "insert" -> "\u001b[2~";
-            case "arrow_up" -> "\u001b[A";
-            case "arrow_down" -> "\u001b[B";
-            case "arrow_right" -> "\u001b[C";
-            case "arrow_left" -> "\u001b[D";
-            case "home" -> "\u001b[H";
-            case "end" -> "\u001b[F";
-            case "page_up" -> "\u001b[5~";
-            case "page_down" -> "\u001b[6~";
-            default -> throw new IllegalArgumentException("invalid named key: " + key);
-        };
+        switch (key) {
+            case "enter": return "\n";
+            case "tab": return "\t";
+            case "escape": return "\u001b";
+            case "backspace": return "\b";
+            case "delete": return "\u001b[3~";
+            case "insert": return "\u001b[2~";
+            case "arrow_up": return "\u001b[A";
+            case "arrow_down": return "\u001b[B";
+            case "arrow_right": return "\u001b[C";
+            case "arrow_left": return "\u001b[D";
+            case "home": return "\u001b[H";
+            case "end": return "\u001b[F";
+            case "page_up": return "\u001b[5~";
+            case "page_down": return "\u001b[6~";
+            default: throw new IllegalArgumentException("invalid named key: " + key);
+        }
     }
 
     private static ObjectNode validate(JsonNode raw) throws IOException {
-        if (!(raw instanceof ObjectNode input) || !input.path("action").isTextual()
-                || !ACTIONS.contains(input.path("action").asText())) {
+        if (!(raw instanceof ObjectNode)) {
+            throw new IllegalArgumentException("terminal arguments must match the advertised action schema");
+        }
+        ObjectNode input = (ObjectNode) raw;
+        if (!input.path("action").isTextual() || !ACTIONS.contains(input.path("action").asText())) {
             throw new IllegalArgumentException("terminal arguments must match the advertised action schema");
         }
         ObjectNode arguments = input.deepCopy();
@@ -542,7 +578,8 @@ final class TerminalTool implements Tool {
         arguments.fieldNames().forEachRemaining(field -> {
             if (!PUBLIC_FIELDS.contains(field)) invalid.add(field);
         });
-        List<String> missing = contract.required.stream().filter(field -> !arguments.has(field)).toList();
+        List<String> missing = contract.required.stream().filter(field -> !arguments.has(field))
+                .collect(Collectors.toList());
         boolean conflict = action.equals("start") && arguments.has("profile") && arguments.has("shell");
         if (!invalid.isEmpty() || !missing.isEmpty() || conflict) {
             throw new IllegalArgumentException("terminal " + action + " invalid_action_fields: invalid=" + invalid
@@ -596,21 +633,37 @@ final class TerminalTool implements Tool {
     }
 
     private static ObjectNode fieldSchema(String field) {
-        return switch (field) {
-            case "cursor_segment", "cursor_offset", "after_event_id", "acknowledge_event_id",
-                    "wait_ceiling_ms" -> JSON.createObjectNode().put("type", "integer")
-                    .put("minimum", 0);
-            case "max_events", "rows", "columns" -> JSON.createObjectNode().put("type", "integer")
-                    .put("minimum", 1).put("maximum", field.equals("max_events") ? 256 : 4096);
-            case "initial_monitors" -> JSON.createObjectNode().put("type", "array");
-            case "shell", "return_when", "dimensions", "write", "monitor" ->
-                    JSON.createObjectNode().put("type", "object");
-            case "backend" -> enumSchema(List.of("native", "tmux"));
-            case "signal" -> enumSchema(List.of("hangup", "interrupt", "quit", "terminate", "kill"));
-            case "close_policy" -> enumSchema(List.of("graceful", "force"));
-            case "lease" -> enumSchema(List.of("use", "acquire", "release"));
-            default -> JSON.createObjectNode().put("type", "string");
-        };
+        switch (field) {
+            case "cursor_segment":
+            case "cursor_offset":
+            case "after_event_id":
+            case "acknowledge_event_id":
+            case "wait_ceiling_ms":
+                return JSON.createObjectNode().put("type", "integer").put("minimum", 0);
+            case "max_events":
+            case "rows":
+            case "columns":
+                return JSON.createObjectNode().put("type", "integer").put("minimum", 1)
+                        .put("maximum", field.equals("max_events") ? 256 : 4096);
+            case "initial_monitors":
+                return JSON.createObjectNode().put("type", "array");
+            case "shell":
+            case "return_when":
+            case "dimensions":
+            case "write":
+            case "monitor":
+                return JSON.createObjectNode().put("type", "object");
+            case "backend":
+                return enumSchema(List.of("native", "tmux"));
+            case "signal":
+                return enumSchema(List.of("hangup", "interrupt", "quit", "terminate", "kill"));
+            case "close_policy":
+                return enumSchema(List.of("graceful", "force"));
+            case "lease":
+                return enumSchema(List.of("use", "acquire", "release"));
+            default:
+                return JSON.createObjectNode().put("type", "string");
+        }
     }
 
     private static ObjectNode enumSchema(List<String> values) {
@@ -650,9 +703,67 @@ final class TerminalTool implements Tool {
         result.put(action, new Contract(allowed, required));
     }
 
-    private record Contract(Set<String> allowed, Set<String> required) { }
+    private static final class Contract {
+        private final Set<String> allowed;
+        private final Set<String> required;
 
-    private record Success(ObjectNode root, ObjectNode body) { }
+        Contract(Set<String> allowed, Set<String> required) {
+            this.allowed = allowed;
+            this.required = required;
+        }
+
+        public Set<String> allowed() { return allowed; }
+        public Set<String> required() { return required; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof Contract)) return false;
+            Contract that = (Contract) other;
+            return Objects.equals(allowed, that.allowed) && Objects.equals(required, that.required);
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * Objects.hashCode(allowed) + Objects.hashCode(required);
+        }
+
+        @Override
+        public String toString() {
+            return "Contract[allowed=" + allowed + ", required=" + required + "]";
+        }
+    }
+
+    private static final class Success {
+        private final ObjectNode root;
+        private final ObjectNode body;
+
+        Success(ObjectNode root, ObjectNode body) {
+            this.root = root;
+            this.body = body;
+        }
+
+        public ObjectNode root() { return root; }
+        public ObjectNode body() { return body; }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof Success)) return false;
+            Success that = (Success) other;
+            return Objects.equals(root, that.root) && Objects.equals(body, that.body);
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * Objects.hashCode(root) + Objects.hashCode(body);
+        }
+
+        @Override
+        public String toString() {
+            return "Success[root=" + root + ", body=" + body + "]";
+        }
+    }
 
     private static final class TerminalSession {
         final String id;

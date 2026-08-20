@@ -104,8 +104,8 @@ class TerminalToolEdgeParityTest {
         ObjectNode result = json.createObjectNode();
         for (int index = 0; index < values.length; index += 2) {
             Object value = values[index + 1];
-            if (value instanceof JsonNode node) result.set((String) values[index], node);
-            else if (value instanceof Integer number) result.put((String) values[index], number);
+            if (value instanceof JsonNode) result.set((String) values[index], (JsonNode) value);
+            else if (value instanceof Integer) result.put((String) values[index], (Integer) value);
             else result.put((String) values[index], String.valueOf(value));
         }
         return result;
