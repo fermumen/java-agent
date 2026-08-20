@@ -5,8 +5,10 @@
 Responses API directly. It does not contain a Vercel AI Gateway or Chat
 Completions transport.
 
-The only runtime dependency is Jackson for JSON. HTTP uses the JDK client, so
-standard corporate JVM proxy and trust-store settings continue to apply.
+The executable agent's only runtime dependency is Jackson for JSON. HTTP uses
+the JDK client, so standard corporate JVM proxy and trust-store settings
+continue to apply. A separately built productivity JAR provides document and
+data-processing libraries to JShell without coupling them to the agent runtime.
 
 ## Features
 
@@ -56,6 +58,34 @@ mvn clean verify
 ```
 
 The shaded executable is written to `target/java-agent.jar`.
+
+Build the optional, pure-Java productivity library bundle:
+
+```sh
+mvn -f productivity/pom.xml clean verify
+```
+
+This writes `productivity/target/productivity.jar` and stages a copy at
+`target/productivity.jar` beside the executable agent:
+
+```text
+java-agent.jar
+productivity.jar
+```
+
+The agent's system prompt supplies that absolute path and directs productivity
+work through JShell. Override the location with
+`JAVA_AGENT_PRODUCTIVITY_JAR` when the files cannot be colocated. For example:
+
+```sh
+jshell --class-path "target/productivity.jar" script.jsh
+java --class-path "target/productivity.jar" Script.java
+```
+
+The bundle contains Apache POI, PDFBox, Tika Core, Commons CSV/IO/Compress/Lang/
+Text/Codec/Math, Jackson JSON and YAML, jsoup, commonmark with GFM tables,
+selected TwelveMonkeys ImageIO plugins, XZ, and XChart. It intentionally omits
+native/JNI dependencies and Tika's full parser package.
 
 ## Configure and run
 

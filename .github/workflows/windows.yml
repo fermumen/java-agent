@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  verify:
+  build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -15,3 +15,12 @@ jobs:
           java-version: "11"
           cache: maven
       - run: mvn -B clean verify
+      - run: mvn -B -f productivity/pom.xml clean verify
+      - name: Upload agent distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-agent-windows-java11
+          path: |
+            target/java-agent.jar
+            target/productivity.jar
+          if-no-files-found: error

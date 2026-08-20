@@ -7,6 +7,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
 import java.io.PrintStream;
+import java.net.URISyntaxException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
@@ -242,6 +245,7 @@ public final class Agent {
     }
 
     public static String defaultSystemPrompt(AgentConfig config) {
+        String productivityJar = productivityJar();
         return String.format(
                 "You are a coding agent working in a local repository. Work autonomously toward the user's request.\n"
                         + "Inspect relevant files before changing them. Keep edits focused, preserve existing work, and verify changes.\n"
@@ -249,10 +253,51 @@ public final class Agent {
                         + "command you did not run. File tools are constrained to the workspace. Destructive or command actions may\n"
                         + "require approval. If a tool fails, reason from the error and choose a safe alternative.\n"
                         + "\n"
+                        + "Productivity work: the bundled Java 11 library set is expected at: %s\n"
+                        + "Verify that file exists before using it; if it is absent, report that the bundle is unavailable.\n"
+                        + "Bundled libraries:\n"
+                        + "- Apache POI: XLS/XLSX, DOCX, and PPTX reading and writing.\n"
+                        + "- PDFBox: PDF reading, writing, rendering, forms, merging, and splitting.\n"
+                        + "- Tika Core: file-type detection and metadata; it does not include Tika's full parser package.\n"
+                        + "- Commons CSV: CSV, TSV, and custom-delimited text parsing and writing.\n"
+                        + "- Jackson: JSON and YAML parsing, generation, trees, and object mapping.\n"
+                        + "- jsoup: HTML/XML parsing, CSS selectors, editing, text extraction, and sanitizing.\n"
+                        + "- commonmark-java: Markdown parsing and HTML/plain-text/Markdown rendering, with GFM tables.\n"
+                        + "- Commons IO: file, directory, and stream utilities.\n"
+                        + "- Commons Compress and XZ: ZIP, TAR, gzip, bzip2, 7z, XZ, and LZMA archives/compression.\n"
+                        + "- Commons Lang, Text, and Codec: strings, escaping, interpolation, encodings, and hashes.\n"
+                        + "- Commons Math: statistics, regression, linear algebra, optimization, and numerical methods.\n"
+                        + "- TwelveMonkeys ImageIO: enhanced JPEG, TIFF, BMP, and PSD support through ImageIO.\n"
+                        + "- XChart: line, scatter, bar, histogram, pie, heatmap, and box charts with image export.\n"
+                        + "Use JShell for Office, PDF, CSV, JSON/YAML, HTML, Markdown, archive, image, chart, text,\n"
+                        + "codec, math, and similar document-processing tasks. Prefer writing a reusable .jsh script in the\n"
+                        + "workspace, then run `jshell --class-path \"%s\" script.jsh`. The production shell is Windows\n"
+                        + "cmd.exe; tests may run in a Linux shell. Quote the JAR and script paths, use the host's path syntax,\n"
+                        + "and do not assume Unix commands exist on Windows. For a normal Java source-file script, use\n"
+                        + "`java --class-path \"%s\" Script.java`. Do not download dependencies at runtime.\n"
+                        + "\n"
                         + "Workspace: %s\n"
                         + "Permission mode: %s\n"
                         + "Current date: %s\n",
-                config.workspace(), config.permissionMode().name().toLowerCase(java.util.Locale.ROOT), LocalDate.now());
+                productivityJar, productivityJar, productivityJar, config.workspace(),
+                config.permissionMode().name().toLowerCase(java.util.Locale.ROOT), LocalDate.now());
+    }
+
+    private static String productivityJar() {
+        String configured = System.getenv("JAVA_AGENT_PRODUCTIVITY_JAR");
+        if (configured != null && !configured.isBlank()) return Path.of(configured).toAbsolutePath().normalize().toString();
+        try {
+            Path location = Path.of(Agent.class.getProtectionDomain().getCodeSource().getLocation().toURI());
+            Path directory = location.getParent();
+            Path colocated = directory.resolve("productivity.jar").toAbsolutePath().normalize();
+            if (Files.exists(colocated)) return colocated.toString();
+            Path project = directory.getFileName().toString().equals("target") ? directory.getParent() : directory;
+            Path development = project.resolve("productivity").resolve("target")
+                    .resolve("productivity.jar").toAbsolutePath().normalize();
+            return Files.exists(development) ? development.toString() : colocated.toString();
+        } catch (URISyntaxException | RuntimeException unavailable) {
+            return Path.of("productivity.jar").toAbsolutePath().normalize().toString();
+        }
     }
 
     void setToolResultSession(String sessionId) {
