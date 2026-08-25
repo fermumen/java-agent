@@ -93,6 +93,6 @@ class TranscriptPresenterTest {
     }
 
     private String output() {
-        return bytes.toString(StandardCharsets.UTF_8);
+        return bytes.toString(StandardCharsets.UTF_8).replace("\r\n", "\n");
     }
 }
