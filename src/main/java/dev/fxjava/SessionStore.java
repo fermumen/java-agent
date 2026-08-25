@@ -33,7 +33,8 @@ import java.util.stream.Collectors;
 /** Compact, atomic persisted-session store derived from fx's durable core contracts. */
 public final class SessionStore {
     private static final int LEGACY_SCHEMA_VERSION = 1;
-    private static final int SCHEMA_VERSION = 2;
+    private static final int ARTIFACT_SCHEMA_VERSION = 2;
+    private static final int SCHEMA_VERSION = 3;
     private static final int MAX_ARTIFACT_REFERENCES = 512;
     private static final int MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024;
     private static final Pattern SAFE_ID = Pattern.compile("[A-Za-z0-9][A-Za-z0-9_-]{0,127}");
@@ -46,21 +47,29 @@ public final class SessionStore {
     private final Path sessions;
     private final Path latest;
     private final Clock clock;
+    private final RecoveryFailpoint recoveryFailpoint;
 
     public SessionStore(ObjectMapper json, Path root) throws IOException {
         this(json, root, Clock.systemUTC());
     }
 
     SessionStore(ObjectMapper json, Path root, Clock clock) throws IOException {
-        this(json, root, clock, true);
+        this(json, root, clock, true, RecoveryFailpoint.NONE);
     }
 
-    private SessionStore(ObjectMapper json, Path root, Clock clock, boolean create) throws IOException {
+    SessionStore(ObjectMapper json, Path root, Clock clock, RecoveryFailpoint recoveryFailpoint)
+            throws IOException {
+        this(json, root, clock, true, recoveryFailpoint);
+    }
+
+    private SessionStore(ObjectMapper json, Path root, Clock clock, boolean create,
+                         RecoveryFailpoint recoveryFailpoint) throws IOException {
         this.json = json;
         this.root = root.toAbsolutePath().normalize();
         this.sessions = this.root.resolve("sessions");
         this.latest = this.root.resolve("latest");
         this.clock = clock;
+        this.recoveryFailpoint = recoveryFailpoint;
         if (create) {
             createManagedDirectory(this.root);
             createManagedDirectory(this.sessions);
@@ -69,7 +78,7 @@ public final class SessionStore {
     }
 
     static SessionStore inspect(ObjectMapper json, Path root) throws IOException {
-        return new SessionStore(json, root, Clock.systemUTC(), false);
+        return new SessionStore(json, root, Clock.systemUTC(), false, RecoveryFailpoint.NONE);
     }
 
     public static Path defaultRoot() {
@@ -81,7 +90,7 @@ public final class SessionStore {
     public Snapshot create(Path workspace, String model, String instructions) throws IOException {
         long now = clock.millis();
         Snapshot snapshot = new Snapshot(newId(now), canonicalWorkspace(workspace), model, "", instructions,
-                now, now, json.createArrayNode());
+                now, now, json.createArrayNode(), new SessionRules());
         save(snapshot);
         return snapshot;
     }
@@ -91,14 +100,10 @@ public final class SessionStore {
         locked(() -> {
             Path directory = sessionDirectory(snapshot.id());
             createManagedDirectory(directory);
-            ArrayNode persisted = SessionImages.externalize(directory, snapshot.input());
-            ArtifactManifest artifacts = ArtifactManifest.from(persisted);
-            SessionImages.verifySidecars(directory, artifacts.images());
-            ToolResultStore.verifySidecars(directory, artifacts.toolResults());
-            ObjectNode encoded = encode(snapshot, persisted, artifacts);
-            validateEncoded(snapshot, encoded);
-            atomicWrite(directory.resolve("session.json"), json.writeValueAsString(encoded));
-            writeLatestUnlocked(snapshot.workspace(), snapshot.id());
+            Snapshot effective = Files.exists(directory.resolve("session.json"), LinkOption.NOFOLLOW_LINKS)
+                    ? snapshot.withRules(load(snapshot.id()).rules()) : snapshot;
+            writeSnapshotUnlocked(effective, directory, false);
+            writeLatestUnlocked(effective.workspace(), effective.id());
         });
     }
 
@@ -109,9 +114,11 @@ public final class SessionStore {
         long size = Files.size(file);
         if (size > MAX_SNAPSHOT_BYTES) throw new IOException("Session snapshot exceeds 8 MiB: " + id);
         JsonNode node;
-        try {
-            node = json.readTree(Files.readString(file, StandardCharsets.UTF_8));
-        } catch (RuntimeException parseFailure) {
+        try (com.fasterxml.jackson.core.JsonParser parser = json.getFactory().createParser(Files.readAllBytes(file))) {
+            parser.enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
+            node = json.readTree(parser);
+            if (parser.nextToken() != null) throw new IOException("Trailing data in session snapshot: " + id);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException | RuntimeException parseFailure) {
             throw new IOException("Corrupt session snapshot: " + id, parseFailure);
         }
         Decoded decoded = decode(id, node);
@@ -122,7 +129,7 @@ public final class SessionStore {
         Snapshot snapshot = decoded.snapshot();
         ArrayNode hydrated = SessionImages.hydrate(file.getParent(), snapshot.input());
         return new Snapshot(snapshot.id(), snapshot.workspace(), snapshot.model(), snapshot.title(),
-                snapshot.instructions(), snapshot.createdAt(), snapshot.updatedAt(), hydrated);
+                snapshot.instructions(), snapshot.createdAt(), snapshot.updatedAt(), hydrated, snapshot.rules());
     }
 
     public Snapshot latest(Path workspace) throws IOException {
@@ -171,30 +178,70 @@ public final class SessionStore {
     }
 
     public Snapshot recover(String id) throws IOException {
+        Snapshot[] result = new Snapshot[1];
+        locked(() -> result[0] = recoverUnlocked(id));
+        return result[0];
+    }
+
+    private Snapshot recoverUnlocked(String id) throws IOException {
         Snapshot source = load(id);
         long now = clock.millis();
         Snapshot recovered = new Snapshot(newId(now), source.workspace(), source.model(), source.title(),
-                source.instructions(), now, now, source.input());
-        List<String> results = ToolResultStore.referencedHandles(source.input());
-        ToolResultStore.copySidecars(sessionDirectory(id), sessionDirectory(recovered.id()), results);
-        save(recovered);
-        return recovered;
+                source.instructions(), now, now, source.input(), source.rules());
+        String stagingName = ".recover-" + UUID.randomUUID();
+        Path staging = sessions.resolve(stagingName);
+        Path promoted = sessionDirectory(recovered.id());
+        createManagedDirectory(staging);
+        boolean promotedDirectory = false;
+        try {
+            ArrayNode persisted = SessionImages.externalize(staging, recovered.input());
+            ArtifactManifest artifacts = ArtifactManifest.from(persisted);
+            ToolResultStore.copySidecars(sessionDirectory(id), staging, artifacts.toolResults());
+            SessionImages.verifySidecars(staging, artifacts.images());
+            ToolResultStore.verifySidecars(staging, artifacts.toolResults());
+            ObjectNode encoded = encode(recovered, persisted, artifacts);
+            validateEncoded(recovered, encoded);
+            atomicWrite(staging.resolve("session.json"), json.writeValueAsString(encoded), true);
+            recoveryFailpoint.beforePromotion();
+            Decoded staged = decode(recovered.id(), encoded);
+            staged.artifacts().validateAgainst(staged.snapshot().input());
+
+            if (Files.exists(promoted, LinkOption.NOFOLLOW_LINKS)) {
+                throw new IOException("Recovered session id already exists: " + recovered.id());
+            }
+            try {
+                Files.move(staging, promoted, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException unsupported) {
+                throw new IOException("Atomic recovered-session promotion is unsupported", unsupported);
+            }
+            promotedDirectory = true;
+            try {
+                writeLatestUnlocked(recovered.workspace(), recovered.id());
+            } catch (IOException latestFailure) {
+                deleteSessionDirectory(promoted);
+                promotedDirectory = false;
+                throw latestFailure;
+            }
+            return recovered;
+        } finally {
+            if (!promotedDirectory && Files.exists(staging, LinkOption.NOFOLLOW_LINKS)) {
+                deleteSessionDirectory(staging);
+            }
+        }
     }
 
     public Snapshot rename(Snapshot snapshot, String title) throws IOException {
         String normalized = title == null ? "" : title.trim();
         if (normalized.length() > 200) throw new IllegalArgumentException("title must be at most 200 characters");
         Snapshot renamed = new Snapshot(snapshot.id(), snapshot.workspace(), snapshot.model(), normalized,
-                snapshot.instructions(), snapshot.createdAt(), clock.millis(), snapshot.input());
-        save(renamed);
-        return renamed;
+                snapshot.instructions(), snapshot.createdAt(), clock.millis(), snapshot.input(), snapshot.rules());
+        return updatePreservingRules(renamed);
     }
 
     public Snapshot update(Snapshot snapshot, ArrayNode input, String instructions) throws IOException {
         Snapshot updated = new Snapshot(snapshot.id(), snapshot.workspace(), snapshot.model(), snapshot.title(),
-                instructions, snapshot.createdAt(), clock.millis(), input);
-        save(updated);
-        return updated;
+                instructions, snapshot.createdAt(), clock.millis(), input, snapshot.rules());
+        return updatePreservingRules(updated);
     }
 
     Snapshot reconfigure(Snapshot snapshot, String model, ArrayNode input, String instructions) throws IOException {
@@ -202,21 +249,50 @@ public final class SessionStore {
             throw new IllegalArgumentException("Invalid session model");
         }
         Snapshot updated = new Snapshot(snapshot.id(), snapshot.workspace(), model, snapshot.title(),
-                instructions, snapshot.createdAt(), clock.millis(), input);
-        save(updated);
-        return updated;
+                instructions, snapshot.createdAt(), clock.millis(), input, snapshot.rules());
+        return updatePreservingRules(updated);
+    }
+
+    /** Loads the exact-match permission rules bound to one saved session. */
+    public SessionRules loadRules(String sessionId) throws IOException {
+        return load(sessionId).rules();
+    }
+
+    /** Atomically replaces embedded rules and returns the authoritative published snapshot. */
+    Snapshot updateRules(Snapshot active, SessionRules rules, long expectedGeneration) throws IOException {
+        if (expectedGeneration == Long.MAX_VALUE) {
+            throw new IOException("Permission rule mutation generation exhausted");
+        }
+        if (rules.generation() != expectedGeneration + 1) {
+            throw new IOException("Invalid permission rule generation");
+        }
+        Snapshot[] result = new Snapshot[1];
+        locked(() -> {
+            Snapshot current = load(active.id());
+            if (current.rules().generation() != expectedGeneration) {
+                throw new IOException("Stale permission rule generation for session " + active.id());
+            }
+            Snapshot updated = current.withRules(rules);
+            writeSnapshotUnlocked(updated, sessionDirectory(updated.id()), false);
+            result[0] = updated;
+        });
+        return result[0];
     }
 
     public void delete(String id) throws IOException {
         locked(() -> {
             Path directory = sessionDirectory(id);
             rejectSymlink(directory);
-            Path file = directory.resolve("session.json");
-            SessionImages.deleteSidecars(directory);
-            ToolResultStore.deleteSidecars(directory);
-            if (Files.exists(file, LinkOption.NOFOLLOW_LINKS)) Files.delete(file);
-            Files.delete(directory);
+            deleteSessionDirectory(directory);
         });
+    }
+
+    private void deleteSessionDirectory(Path directory) throws IOException {
+        Path file = directory.resolve("session.json");
+        SessionImages.deleteSidecars(directory);
+        ToolResultStore.deleteSidecars(directory);
+        if (Files.exists(file, LinkOption.NOFOLLOW_LINKS)) Files.delete(file);
+        Files.delete(directory);
     }
 
     private ObjectNode encode(Snapshot snapshot, ArrayNode input, ArtifactManifest artifacts) {
@@ -230,6 +306,7 @@ public final class SessionStore {
         node.put("created_at", snapshot.createdAt());
         node.put("updated_at", snapshot.updatedAt());
         node.set("input", input);
+        node.set("permission_state", snapshot.rules().encode(json));
         ObjectNode encodedArtifacts = node.putObject("artifacts");
         ArrayNode images = encodedArtifacts.putArray("images");
         artifacts.images().forEach(images::add);
@@ -243,7 +320,8 @@ public final class SessionStore {
             throw new IOException("Unsupported or corrupt session snapshot: " + expectedId);
         }
         int schemaVersion = node.path("schema_version").asInt(-1);
-        if (schemaVersion != LEGACY_SCHEMA_VERSION && schemaVersion != SCHEMA_VERSION) {
+        if (schemaVersion != LEGACY_SCHEMA_VERSION && schemaVersion != ARTIFACT_SCHEMA_VERSION
+                && schemaVersion != SCHEMA_VERSION) {
             throw new IOException("Unsupported or corrupt session snapshot: " + expectedId);
         }
         String id = requiredText(node, "id");
@@ -258,8 +336,9 @@ public final class SessionStore {
             throw new IOException("Invalid session timeline or input: " + expectedId);
         }
         Snapshot snapshot = new Snapshot(id, workspace, model, title, instructions, created, updated,
-                (ArrayNode) node.path("input"));
-        ArtifactManifest artifacts = schemaVersion == SCHEMA_VERSION
+                (ArrayNode) node.path("input"), schemaVersion == SCHEMA_VERSION
+                        ? SessionRules.decode(node.get("permission_state")) : new SessionRules());
+        ArtifactManifest artifacts = schemaVersion >= ARTIFACT_SCHEMA_VERSION
                 ? ArtifactManifest.decode(node.path("artifacts")) : null;
         return new Decoded(snapshot, artifacts);
     }
@@ -276,6 +355,29 @@ public final class SessionStore {
         if (json.writeValueAsBytes(encoded).length > MAX_SNAPSHOT_BYTES) {
             throw new IOException("Session snapshot exceeds 8 MiB: " + snapshot.id());
         }
+    }
+
+    private Snapshot updatePreservingRules(Snapshot candidate) throws IOException {
+        validate(candidate);
+        Snapshot[] result = new Snapshot[1];
+        locked(() -> {
+            Snapshot current = load(candidate.id());
+            Snapshot updated = candidate.withRules(current.rules());
+            writeSnapshotUnlocked(updated, sessionDirectory(updated.id()), false);
+            writeLatestUnlocked(updated.workspace(), updated.id());
+            result[0] = updated;
+        });
+        return result[0];
+    }
+
+    private void writeSnapshotUnlocked(Snapshot snapshot, Path directory, boolean requireAtomic) throws IOException {
+        ArrayNode persisted = SessionImages.externalize(directory, snapshot.input());
+        ArtifactManifest artifacts = ArtifactManifest.from(persisted);
+        SessionImages.verifySidecars(directory, artifacts.images());
+        ToolResultStore.verifySidecars(directory, artifacts.toolResults());
+        ObjectNode encoded = encode(snapshot, persisted, artifacts);
+        validateEncoded(snapshot, encoded);
+        atomicWrite(directory.resolve("session.json"), json.writeValueAsString(encoded), requireAtomic);
     }
 
     private Path sessionFile(String id) {
@@ -296,7 +398,8 @@ public final class SessionStore {
             createManagedDirectory(root);
             Path lockPath = root.resolve("sessions.lock");
             rejectSymlink(lockPath);
-            try (FileChannel channel = FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+            try (FileChannel channel = FileChannel.open(lockPath, StandardOpenOption.CREATE,
+                    StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
                  var ignored = channel.lock()) {
                 action.run();
             }
@@ -306,14 +409,26 @@ public final class SessionStore {
     @FunctionalInterface
     private interface IoAction { void run() throws IOException; }
 
+    @FunctionalInterface
+    interface RecoveryFailpoint {
+        RecoveryFailpoint NONE = () -> { };
+        void beforePromotion() throws IOException;
+    }
+
     private void atomicWrite(Path target, String content) throws IOException {
+        atomicWrite(target, content, false);
+    }
+
+    private void atomicWrite(Path target, String content, boolean requireAtomic) throws IOException {
         createManagedDirectory(target.getParent());
+        if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) rejectSymlink(target);
         Path temporary = Files.createTempFile(target.getParent(), ".session-", ".tmp");
         try {
             Files.writeString(temporary, content, StandardCharsets.UTF_8);
             try {
                 Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             } catch (AtomicMoveNotSupportedException unsupported) {
+                if (requireAtomic) throw new IOException("Atomic session snapshot persistence is unsupported", unsupported);
                 Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING);
             }
         } finally {
@@ -380,9 +495,15 @@ public final class SessionStore {
         private final long createdAt;
         private final long updatedAt;
         private final ArrayNode input;
+        private final SessionRules rules;
 
         public Snapshot(String id, String workspace, String model, String title, String instructions,
                         long createdAt, long updatedAt, ArrayNode input) {
+            this(id, workspace, model, title, instructions, createdAt, updatedAt, input, new SessionRules());
+        }
+
+        Snapshot(String id, String workspace, String model, String title, String instructions,
+                 long createdAt, long updatedAt, ArrayNode input, SessionRules rules) {
             this.id = id;
             this.workspace = workspace;
             this.model = model;
@@ -391,6 +512,7 @@ public final class SessionStore {
             this.createdAt = createdAt;
             this.updatedAt = updatedAt;
             this.input = input == null ? new ObjectMapper().createArrayNode() : input.deepCopy();
+            this.rules = rules == null ? new SessionRules() : rules.copy();
         }
 
         public String id() { return id; }
@@ -401,6 +523,11 @@ public final class SessionStore {
         public long createdAt() { return createdAt; }
         public long updatedAt() { return updatedAt; }
         public ArrayNode input() { return input.deepCopy(); }
+        SessionRules rules() { return rules.copy(); }
+
+        Snapshot withRules(SessionRules replacement) {
+            return new Snapshot(id, workspace, model, title, instructions, createdAt, updatedAt, input, replacement);
+        }
 
         @Override
         public boolean equals(Object other) {
@@ -410,7 +537,9 @@ public final class SessionStore {
             return createdAt == that.createdAt && updatedAt == that.updatedAt
                     && Objects.equals(id, that.id) && Objects.equals(workspace, that.workspace)
                     && Objects.equals(model, that.model) && Objects.equals(title, that.title)
-                    && Objects.equals(instructions, that.instructions) && Objects.equals(input, that.input);
+                    && Objects.equals(instructions, that.instructions) && Objects.equals(input, that.input)
+                    && rules.generation() == that.rules.generation() && rules.nextId() == that.rules.nextId()
+                    && rules.all().equals(that.rules.all());
         }
 
         @Override
@@ -422,7 +551,10 @@ public final class SessionStore {
             result = 31 * result + Objects.hashCode(instructions);
             result = 31 * result + Long.hashCode(createdAt);
             result = 31 * result + Long.hashCode(updatedAt);
-            return 31 * result + Objects.hashCode(input);
+            result = 31 * result + Objects.hashCode(input);
+            result = 31 * result + Long.hashCode(rules.generation());
+            result = 31 * result + Long.hashCode(rules.nextId());
+            return 31 * result + rules.all().hashCode();
         }
 
         @Override

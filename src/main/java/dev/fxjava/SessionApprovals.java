@@ -22,4 +22,8 @@ final class SessionApprovals {
     synchronized int count() {
         return grants.size();
     }
+
+    synchronized void clear() {
+        grants.clear();
+    }
 }

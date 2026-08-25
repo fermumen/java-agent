@@ -169,6 +169,7 @@ public final class Agent {
         if (callId.isBlank()) throw new IOException("OpenAI returned a function call without call_id");
 
         String result;
+        boolean policyDenied = false;
         Tool tool = resolveTool(name);
         if (tool == null || !tool.advertised()) {
             result = "Error: unknown tool '" + name + "'";
@@ -181,7 +182,9 @@ public final class Agent {
                 String preview = tool.preview(arguments);
                 progress.println("[tool] " + preview);
                 turnListener.onToolStart(name, preview);
-                if (tool.requiresApproval(arguments) && !approvalPolicy.approve(tool, arguments)) {
+                if (approvalPolicy.preflightDeny(tool, arguments)
+                        || (tool.requiresApproval(arguments) && !approvalPolicy.approve(tool, arguments))) {
+                    policyDenied = true;
                     result = "Error: user denied this tool call";
                 } else {
                     result = tool.execute(arguments, callId);
@@ -194,7 +197,7 @@ public final class Agent {
             }
         }
 
-        boolean toolError = tool == null || tool.isErrorResult(result);
+        boolean toolError = policyDenied || tool == null || tool.isErrorResult(result);
         if (resultStore != null && !name.equals("read_tool_result")) {
             result = resultStore.prepare(callId, name, result);
         }

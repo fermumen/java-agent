@@ -29,4 +29,14 @@ class SessionApprovalsTest {
         assertEquals(0, restarted.count());
         assertFalse(restarted.allows("write_file", "create smoke.txt"));
     }
+
+    @Test
+    void clearExpiresAllCurrentSessionGrants() {
+        SessionApprovals approvals = new SessionApprovals();
+        approvals.grant("write_file", "create smoke.txt");
+        approvals.grant("run_command", "mvn test");
+        approvals.clear();
+        assertEquals(0, approvals.count());
+        assertFalse(approvals.allows("write_file", "create smoke.txt"));
+    }
 }

@@ -312,7 +312,7 @@ final class InteractiveShell implements QuestionFlow {
         if (!line.isBlank()) dispatch(line.strip());
     }
 
-    private void dispatch(String line) throws IOException, InterruptedException {
+    void dispatch(String line) throws IOException, InterruptedException {
         boolean persistedCommand = line.equals("/new") || line.equals("/sessions")
                 || line.equals("/resume") || line.startsWith("/resume ")
                 || line.startsWith("/recover ") || line.startsWith("/rename ");
@@ -344,16 +344,19 @@ final class InteractiveShell implements QuestionFlow {
                 break;
             case "/new":
                 session.newSession(config.workspace(), config.model(), systemPrompt);
+                approvalRouter.clearSessionGrants();
                 out.println("New session: " + session.id());
                 break;
             case "/resume": {
                 String id = argumentAfter(line, "/resume");
                 session.resume(id.isEmpty() ? "last" : id, config.workspace());
+                approvalRouter.clearSessionGrants();
                 out.println("Resumed session: " + session.id());
                 break;
             }
             case "/recover":
                 session.recover(argumentAfter(line, "/recover"), config.workspace());
+                approvalRouter.clearSessionGrants();
                 out.println("Recovered as: " + session.id());
                 break;
             case "/sessions":
@@ -367,7 +370,8 @@ final class InteractiveShell implements QuestionFlow {
                 out.println("Model " + config.model() + " · source: " + modelSource);
                 break;
             case "/permissions":
-                out.println("mode=" + modeLabel() + " grants=" + approvalRouter.grantCount());
+                PermissionCommands.handle(session, argumentAfter(line, "/permissions"),
+                        modeLabel(), approvalRouter.grantCount(), ansi, out);
                 break;
             case "/status":
                 printStatus();

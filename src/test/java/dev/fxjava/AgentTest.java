@@ -16,6 +16,7 @@ import java.util.Queue;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AgentTest {
@@ -52,6 +53,34 @@ class AgentTest {
         assertEquals("Denied safely", agent.prompt("Do it"));
         assertEquals("Error: user denied this tool call",
                 client.requests.get(1).path(3).path("output").asText());
+    }
+
+    @Test
+    void preflightDenyBlocksANormallySafeToolEndToEnd() throws Exception {
+        FakeClient client = new FakeClient(toolResponse("call-safe", "safe_echo", "{\"value\":\"no\"}"),
+                textResponse("Denied safely"));
+        AtomicInteger executions = new AtomicInteger();
+        EchoTool safe = new EchoTool() {
+            @Override public String name() { return "safe_echo"; }
+            @Override public boolean requiresApproval() { return false; }
+            @Override public String execute(JsonNode arguments) {
+                executions.incrementAndGet();
+                return super.execute(arguments);
+            }
+        };
+        SessionRules rules = new SessionRules();
+        rules.remember(SessionRules.Kind.DENY, safe.name(),
+                SessionRules.normalizeArguments(json.readTree("{\"value\":\"no\"}")));
+        ApprovalRouter router = new ApprovalRouter((tool, arguments) -> true);
+        router.bindRules(() -> rules, false);
+        Agent agent = new Agent(json, client, List.of(safe), router,
+                new PrintStream(new ByteArrayOutputStream()), 5, "system");
+
+        assertEquals("Denied safely", agent.prompt("Do it"));
+        assertEquals("Error: user denied this tool call",
+                client.requests.get(1).path(3).path("output").asText());
+        assertEquals(0, executions.get());
+        assertFalse(safe.requiresApproval(), "the denial came from preflight, not normal approval");
     }
 
     @Test

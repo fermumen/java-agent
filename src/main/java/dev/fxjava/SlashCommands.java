@@ -73,7 +73,11 @@ final class SlashCommands {
             new Spec("/recover", List.of(), "<id>", "recover an interrupted session", Category.SESSION),
             new Spec("/rename", List.of(), "<title>", "rename the current session", Category.SESSION),
             new Spec("/model", List.of(), "", "print the current model and its source", Category.MODEL),
-            new Spec("/permissions", List.of(), "", "print the permission mode and session grants",
+            new Spec("/permissions", List.of(), "", "print the permission mode, grants, and remembered rules",
+                    Category.PERMISSIONS),
+            new Spec("/permissions remember", List.of(), "<allow|deny> <tool-name> <arguments-json>",
+                    "remember an exact rule for this saved session", Category.PERMISSIONS),
+            new Spec("/permissions revoke", List.of(), "<id>", "revoke a remembered rule by id",
                     Category.PERMISSIONS),
             new Spec("/mcp", List.of(), "[list|status]", "show MCP server health", Category.MCP));
 
@@ -143,13 +147,11 @@ final class SlashCommands {
     static String catalog(String query, int columns, Ansi ansi) {
         List<List<Spec>> groups = new ArrayList<>();
         List<Category> categories = new ArrayList<>();
-        int usageWidth = 0;
         for (Category category : Category.values()) {
             List<Spec> specs = new ArrayList<>();
             for (Spec spec : REGISTRY) {
                 if (spec.category == category && matchesQuery(spec, query)) {
                     specs.add(spec);
-                    usageWidth = Math.max(usageWidth, spec.usage().length());
                 }
             }
             if (!specs.isEmpty()) {
@@ -165,6 +167,7 @@ final class SlashCommands {
         for (int group = 0; group < groups.size(); group++) {
             if (group > 0) out.append('\n');
             out.append(ansi.dim()).append(categories.get(group).label()).append(ansi.reset()).append('\n');
+            int usageWidth = groups.get(group).stream().mapToInt(spec -> spec.usage().length()).max().orElse(0);
             for (Spec spec : groups.get(group)) {
                 int descriptionBudget = Math.max(1, columns - 4 - usageWidth);
                 String description = ToolGroupLines.truncate(spec.description, descriptionBudget);
@@ -188,8 +191,10 @@ final class SlashCommands {
     private static String firstToken(String line) {
         if (line == null) return null;
         String stripped = line.strip();
-        int space = stripped.indexOf(' ');
-        return space < 0 ? stripped : stripped.substring(0, space);
+        for (int index = 0; index < stripped.length(); index++) {
+            if (Character.isWhitespace(stripped.charAt(index))) return stripped.substring(0, index);
+        }
+        return stripped;
     }
 
     private static String pad(String value, int width) {

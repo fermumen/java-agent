@@ -8,12 +8,14 @@ import java.util.concurrent.SynchronousQueue;
 import java.util.function.Supplier;
 
 /**
- * Approval policy for interactive runs: consults session "always" grants,
- * then hands the request to the raw shell's main loop through a synchronous
- * handoff so only the shell ever reads stdin while generating. With no
- * attached channel (non-TTY or legacy fallback) it delegates byte-identically
- * to the wrapped policy. Also routes ask_user_question line input through the
- * same channel.
+ * Approval policy for interactive runs: consults persistent exact-match
+ * session permission rules (denies before allows), then session "always"
+ * grants, then hands the request to the raw shell's main loop through a
+ * synchronous handoff so only the shell ever reads stdin while generating.
+ * With no attached channel (non-TTY or legacy fallback) it delegates
+ * byte-identically to the wrapped policy; a policy that already approves
+ * everything bypasses rules and grants entirely. Also routes
+ * ask_user_question line input through the same channel.
  */
 final class ApprovalRouter implements ApprovalPolicy {
     /** Marker returned over the reply slot when the user cancelled or EOF hit. */
@@ -68,6 +70,8 @@ final class ApprovalRouter implements ApprovalPolicy {
     private final SessionApprovals grants;
     private final SynchronousQueue<Request> pending = new SynchronousQueue<>();
     private volatile Channel channel;
+    private volatile Supplier<SessionRules> rulesSupplier;
+    private volatile boolean bypassRules;
 
     ApprovalRouter(ApprovalPolicy fallback) {
         this(fallback, new SessionApprovals());
@@ -90,8 +94,22 @@ final class ApprovalRouter implements ApprovalPolicy {
         return channel;
     }
 
+    /**
+     * Binds the active session's persistent rules; a policy that approves
+     * everything (yolo) passes {@code allowAllPolicy} so it keeps bypassing
+     * every permission check.
+     */
+    void bindRules(Supplier<SessionRules> supplier, boolean allowAllPolicy) {
+        rulesSupplier = supplier;
+        bypassRules = allowAllPolicy;
+    }
+
     int grantCount() {
         return grants.count();
+    }
+
+    void clearSessionGrants() {
+        grants.clear();
     }
 
     Request poll() {
@@ -99,9 +117,57 @@ final class ApprovalRouter implements ApprovalPolicy {
     }
 
     @Override
+    public boolean preflightDeny(Tool tool, JsonNode arguments) {
+        if (bypassRules) return false;
+        Supplier<SessionRules> supplier = bypassRules ? null : rulesSupplier;
+        if (supplier != null) {
+            SessionRules active = supplier.get();
+            if (active != null) {
+                SessionRules.Decision decision =
+                        active.decide(tool.name(), SessionRules.normalizeArguments(arguments));
+                return decision == SessionRules.Decision.DENY;
+            }
+        }
+        return false;
+    }
+
+    @Override
     public boolean approve(Tool tool, JsonNode arguments) {
+        if (bypassRules) return fallback.approve(tool, arguments);
         String preview = ApprovalPrompt.flatten(tool.preview(arguments));
+        Supplier<SessionRules> supplier = rulesSupplier;
+        if (supplier != null) {
+            SessionRules active = supplier.get();
+            if (active != null) {
+                SessionRules.Decision decision =
+                        active.decide(tool.name(), SessionRules.normalizeArguments(arguments));
+                if (decision == SessionRules.Decision.DENY) return false;
+                if (decision == SessionRules.Decision.ALLOW) return true;
+            }
+        }
         if (grants.allows(tool.name(), preview)) return true;
+        return prompt(tool, arguments, preview);
+    }
+
+    /** Captures the parent's current deny authority without inheriting allows or grants. */
+    ApprovalPolicy childAuthority(SessionRules parentRules) {
+        SessionRules projected = parentRules == null ? new SessionRules() : parentRules.denyOnlyCopy();
+        return new ApprovalPolicy() {
+            @Override
+            public boolean preflightDeny(Tool tool, JsonNode arguments) {
+                return projected.decide(tool.name(), SessionRules.normalizeArguments(arguments))
+                        == SessionRules.Decision.DENY;
+            }
+
+            @Override
+            public boolean approve(Tool tool, JsonNode arguments) {
+                if (preflightDeny(tool, arguments)) return false;
+                return prompt(tool, arguments, ApprovalPrompt.flatten(tool.preview(arguments)));
+            }
+        };
+    }
+
+    private boolean prompt(Tool tool, JsonNode arguments, String preview) {
         Channel active = channel;
         if (active == null) return fallback.approve(tool, arguments);
         try {

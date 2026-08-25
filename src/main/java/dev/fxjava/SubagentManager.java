@@ -24,6 +24,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
 /** Bounded asynchronous child-session manager behind the fx-shaped subagent tool. */
 final class SubagentManager implements AutoCloseable {
@@ -40,6 +41,7 @@ final class SubagentManager implements AutoCloseable {
     private final ExecutorService executor;
     private final SubagentStateStore stateStore;
     private final LongSupplier clock;
+    private final Supplier<String> authoritySession;
     private final Map<String, Child> children = new LinkedHashMap<>();
     private final LinkedHashMap<String, OperationReplay> operations = new LinkedHashMap<>();
     private final Object operationMutex = new Object();
@@ -49,16 +51,27 @@ final class SubagentManager implements AutoCloseable {
     }
 
     SubagentManager(ObjectMapper json, ChildFactory childFactory, PermissionMode parentPermission, Path stateRoot) {
-        this(json, childFactory, parentPermission, stateRoot, System::currentTimeMillis);
+        this(json, childFactory, parentPermission, stateRoot, System::currentTimeMillis, () -> null);
+    }
+
+    SubagentManager(ObjectMapper json, ChildFactory childFactory, PermissionMode parentPermission, Path stateRoot,
+                    Supplier<String> authoritySession) {
+        this(json, childFactory, parentPermission, stateRoot, System::currentTimeMillis, authoritySession);
     }
 
     SubagentManager(ObjectMapper json, ChildFactory childFactory, PermissionMode parentPermission, Path stateRoot,
                     LongSupplier clock) {
+        this(json, childFactory, parentPermission, stateRoot, clock, () -> null);
+    }
+
+    private SubagentManager(ObjectMapper json, ChildFactory childFactory, PermissionMode parentPermission,
+                            Path stateRoot, LongSupplier clock, Supplier<String> authoritySession) {
         this.json = json;
         this.childFactory = childFactory;
         this.parentPermission = parentPermission;
         this.stateStore = new SubagentStateStore(json, stateRoot);
         this.clock = clock;
+        this.authoritySession = authoritySession;
         ThreadFactory threads = task -> {
             Thread thread = new Thread(task, "java-agent-subagent");
             thread.setDaemon(true);
@@ -88,8 +101,24 @@ final class SubagentManager implements AutoCloseable {
             }
             ChildConfiguration configuration = new ChildConfiguration(id, name,
                     config.path("model").isTextual() ? config.path("model").asText() : null,
-                    config.path("effort").isTextual() ? config.path("effort").asText() : null, permission);
-            ChildRunner runner = childFactory.create(configuration);
+                    config.path("effort").isTextual() ? config.path("effort").asText() : null, permission,
+                    config.path("authority_session_id").isTextual()
+                            ? config.path("authority_session_id").asText() : null);
+            ChildRunner runner;
+            String isolationFailure = null;
+            if (permission != PermissionMode.YOLO
+                    && (configuration.authoritySessionId() == null
+                    || configuration.authoritySessionId().isBlank())) {
+                runner = isolatedRunner();
+                isolationFailure = "permission_authority_unavailable";
+            } else {
+                try {
+                    runner = childFactory.create(configuration);
+                } catch (Exception unavailableAuthority) {
+                    runner = isolatedRunner();
+                    isolationFailure = "permission_authority_unavailable";
+                }
+            }
             Child child = new Child(id, name, mode, configuration, runner);
             if (config.path("notifications").isObject()) {
                 child.notifications = ((ObjectNode) config.path("notifications")).deepCopy();
@@ -98,6 +127,10 @@ final class SubagentManager implements AutoCloseable {
             child.archivedFrom = saved.path("archived_from").asText("idle");
             child.parentId = saved.path("parent_id").isTextual() ? saved.path("parent_id").asText() : null;
             child.failure = saved.path("failure").isTextual() ? saved.path("failure").asText() : null;
+            if (isolationFailure != null) {
+                child.state = "failed";
+                child.failure = isolationFailure;
+            }
             child.generation = Math.max(1, saved.path("generation").asLong(1));
             child.eventSequence = Math.max(0, saved.path("event_sequence").asLong());
             child.parentDeliverySequence = Math.max(0, saved.path("parent_delivery_sequence").asLong());
@@ -120,7 +153,9 @@ final class SubagentManager implements AutoCloseable {
             for (JsonNode event : saved.path("events")) {
                 if (child.events.size() < MAX_EVENTS) child.events.add(event.deepCopy());
             }
-            if (saved.path("conversation").isObject()) runner.restore((ObjectNode) saved.path("conversation"));
+            if (isolationFailure == null && saved.path("conversation").isObject()) {
+                runner.restore((ObjectNode) saved.path("conversation"));
+            }
             children.put(id, child);
             persist(child);
         }
@@ -167,6 +202,10 @@ final class SubagentManager implements AutoCloseable {
 
     private static String reconcile(String state) {
         return Set.of("queued", "running", "awaiting_approval").contains(state) ? "interrupted" : state;
+    }
+
+    private static ChildRunner isolatedRunner() {
+        return prompt -> { throw new IOException("Subagent permission authority is unavailable"); };
     }
 
     synchronized Agent.PreparedParentContext prepareParentContext(String parentId) throws IOException {
@@ -413,7 +452,8 @@ final class SubagentManager implements AutoCloseable {
             PermissionMode permission = clamp(PermissionMode.parse(requestedPermission), parentPermission);
             ChildConfiguration configuration = new ChildConfiguration(id, value.path("name").asText(),
                     value.path("model").isTextual() ? value.path("model").asText() : null,
-                    value.path("effort").isTextual() ? value.path("effort").asText() : null, permission);
+                    value.path("effort").isTextual() ? value.path("effort").asText() : null, permission,
+                    authoritySession.get());
             ChildRunner runner = childFactory.create(configuration);
             child = new Child(id, value.path("name").asText(), value.path("mode").asText(),
                     configuration, runner);
@@ -539,7 +579,8 @@ final class SubagentManager implements AutoCloseable {
             PermissionMode permission = value.path("permission_mode").isTextual()
                     ? clamp(PermissionMode.parse(value.path("permission_mode").asText()), parentPermission)
                     : child.configuration.permissionMode();
-            ChildConfiguration replacement = new ChildConfiguration(child.id, name, model, effort, permission);
+            ChildConfiguration replacement = new ChildConfiguration(child.id, name, model, effort, permission,
+                    child.configuration.authoritySessionId());
             try {
                 child.runner.configure(replacement);
             } catch (Exception failure) {
@@ -754,6 +795,8 @@ final class SubagentManager implements AutoCloseable {
                 .put("permission_mode", child.configuration.permissionMode().name().toLowerCase());
         if (child.configuration.model() == null) result.putNull("model"); else result.put("model", child.configuration.model());
         if (child.configuration.effort() == null) result.putNull("effort"); else result.put("effort", child.configuration.effort());
+        if (child.configuration.authoritySessionId() == null) result.putNull("authority_session_id");
+        else result.put("authority_session_id", child.configuration.authoritySessionId());
         result.set("notifications", child.notifications.deepCopy());
         return result;
     }
@@ -902,13 +945,20 @@ final class SubagentManager implements AutoCloseable {
         private final String model;
         private final String effort;
         private final PermissionMode permissionMode;
+        private final String authoritySessionId;
 
         ChildConfiguration(String id, String name, String model, String effort, PermissionMode permissionMode) {
+            this(id, name, model, effort, permissionMode, null);
+        }
+
+        ChildConfiguration(String id, String name, String model, String effort, PermissionMode permissionMode,
+                           String authoritySessionId) {
             this.id = id;
             this.name = name;
             this.model = model;
             this.effort = effort;
             this.permissionMode = permissionMode;
+            this.authoritySessionId = authoritySessionId;
         }
 
         public String id() { return id; }
@@ -916,6 +966,7 @@ final class SubagentManager implements AutoCloseable {
         public String model() { return model; }
         public String effort() { return effort; }
         public PermissionMode permissionMode() { return permissionMode; }
+        public String authoritySessionId() { return authoritySessionId; }
 
         @Override
         public boolean equals(Object other) {
@@ -924,7 +975,8 @@ final class SubagentManager implements AutoCloseable {
             ChildConfiguration that = (ChildConfiguration) other;
             return Objects.equals(id, that.id) && Objects.equals(name, that.name)
                     && Objects.equals(model, that.model) && Objects.equals(effort, that.effort)
-                    && permissionMode == that.permissionMode;
+                    && permissionMode == that.permissionMode
+                    && Objects.equals(authoritySessionId, that.authoritySessionId);
         }
 
         @Override
@@ -934,6 +986,7 @@ final class SubagentManager implements AutoCloseable {
             result = 31 * result + Objects.hashCode(model);
             result = 31 * result + Objects.hashCode(effort);
             result = 31 * result + Objects.hashCode(permissionMode);
+            result = 31 * result + Objects.hashCode(authoritySessionId);
             return result;
         }
 

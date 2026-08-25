@@ -35,6 +35,7 @@ class MainInfoCommandTest {
         assertEquals("auto", permissions.path("mode").asText());
         assertEquals(0, permissions.path("grant_count").asInt());
         assertTrue(permissions.path("rules").isArray());
+        assertEquals("none", permissions.path("rules_scope").asText());
     }
 
     @Test

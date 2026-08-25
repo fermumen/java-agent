@@ -19,7 +19,7 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
     private final int maxSteps;
     private final Path sessionRoot;
     private final AtomicReference<List<Tool>> tools;
-    private final ApprovalPolicy parentApproval;
+    private final ApprovalPolicy parentAuthority;
     private final PrintStream progress;
     private final Agent.ParentContext parentContext;
     private SubagentManager.ChildConfiguration configuration;
@@ -46,7 +46,7 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
         this.maxSteps = maxSteps;
         this.sessionRoot = sessionRoot;
         this.tools = tools;
-        this.parentApproval = parentApproval;
+        this.parentAuthority = parentApproval;
         this.progress = progress;
         this.parentContext = parentContext;
         this.configuration = configuration;
@@ -96,7 +96,8 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
             else childTools.add(tool);
         }
         Agent built = new Agent(json, new OpenAiResponsesClient(json, config), childTools,
-                approval(child.permissionMode()), progress, maxSteps, instructionsFor(child, null), results,
+                approval(child.permissionMode(), parentAuthority, progress), progress, maxSteps,
+                instructionsFor(child, null), results,
                 parentContext);
         built.setToolResultSession(child.id());
         return built;
@@ -113,15 +114,25 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
         return Agent.defaultSystemPrompt(config) + SkillTool.catalog(workspace, sessionRoot) + identity;
     }
 
-    private ApprovalPolicy approval(PermissionMode mode) {
+    static ApprovalPolicy approval(PermissionMode mode, ApprovalPolicy parentAuthority, PrintStream progress) {
         if (mode == PermissionMode.YOLO) return (tool, arguments) -> true;
-        if (mode == PermissionMode.ASK) return parentApproval;
-        return (tool, arguments) -> {
-            boolean allowed;
-            try { allowed = tool.autoApprove(arguments); }
-            catch (Exception invalid) { allowed = false; }
-            progress.println("[subagent-auto-" + (allowed ? "approved] " : "denied] ") + tool.preview(arguments));
-            return allowed;
+        if (mode == PermissionMode.ASK) return parentAuthority;
+        return new ApprovalPolicy() {
+            @Override
+            public boolean preflightDeny(Tool tool, com.fasterxml.jackson.databind.JsonNode arguments) {
+                return parentAuthority.preflightDeny(tool, arguments);
+            }
+
+            @Override
+            public boolean approve(Tool tool, com.fasterxml.jackson.databind.JsonNode arguments) {
+                if (preflightDeny(tool, arguments)) return false;
+                boolean allowed;
+                try { allowed = tool.autoApprove(arguments); }
+                catch (Exception invalid) { allowed = false; }
+                progress.println("[subagent-auto-" + (allowed ? "approved] " : "denied] ")
+                        + tool.preview(arguments));
+                return allowed;
+            }
         };
     }
 }

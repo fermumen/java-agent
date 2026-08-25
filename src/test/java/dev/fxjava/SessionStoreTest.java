@@ -74,25 +74,43 @@ class SessionStoreTest {
     }
 
     @Test
-    void schemaV1LoadsAndRewritesAsSchemaV2WithArtifactManifest() throws Exception {
+    void schemaV1AndV2LoadAsExplicitEmptyAndRewriteAsV3() throws Exception {
+        for (int version : List.of(1, 2)) {
+            SessionStore.Snapshot created = store.create(workspaceA, "gpt-5.6", "system");
+            Path file = temporary.resolve("state/sessions").resolve(created.id()).resolve("session.json");
+            ObjectNode legacy = (ObjectNode) json.readTree(Files.readString(file));
+            legacy.put("schema_version", version);
+            legacy.remove("permission_state");
+            if (version == 1) legacy.remove("artifacts");
+            Files.writeString(file, json.writeValueAsString(legacy), StandardCharsets.UTF_8);
+
+            SessionStore.Snapshot loaded = store.load(created.id());
+            assertEquals(0, loaded.rules().count());
+            assertEquals(version, json.readTree(Files.readString(file)).path("schema_version").asInt());
+
+            store.save(loaded);
+            ObjectNode migrated = (ObjectNode) json.readTree(Files.readString(file));
+            assertEquals(3, migrated.path("schema_version").asInt());
+            assertEquals(1, migrated.path("permission_state").path("next_id").asLong());
+            assertEquals(0, migrated.path("permission_state").path("mutation_generation").asLong());
+            assertTrue(migrated.path("permission_state").path("rules").isArray());
+            assertTrue(migrated.path("artifacts").path("images").isArray());
+        }
+    }
+
+    @Test
+    void schemaV3MissingOrCorruptPermissionStateFailsClosed() throws Exception {
         SessionStore.Snapshot created = store.create(workspaceA, "gpt-5.6", "system");
         Path file = temporary.resolve("state/sessions").resolve(created.id()).resolve("session.json");
-        ObjectNode legacy = (ObjectNode) json.readTree(Files.readString(file));
-        legacy.put("schema_version", 1);
-        legacy.remove("artifacts");
-        Files.writeString(file, json.writeValueAsString(legacy), StandardCharsets.UTF_8);
+        ObjectNode encoded = (ObjectNode) json.readTree(Files.readString(file));
+        encoded.remove("permission_state");
+        Files.writeString(file, json.writeValueAsString(encoded), StandardCharsets.UTF_8);
+        assertThrows(IOException.class, () -> store.load(created.id()));
 
-        SessionStore.Snapshot loaded = store.load(created.id());
-        assertEquals(created, loaded);
-        assertEquals(1, json.readTree(Files.readString(file)).path("schema_version").asInt());
-
-        store.save(loaded);
-        ObjectNode migrated = (ObjectNode) json.readTree(Files.readString(file));
-        assertEquals(2, migrated.path("schema_version").asInt());
-        assertTrue(migrated.path("artifacts").path("images").isArray());
-        assertTrue(migrated.path("artifacts").path("tool_results").isArray());
-        assertEquals(0, migrated.path("artifacts").path("images").size());
-        assertEquals(0, migrated.path("artifacts").path("tool_results").size());
+        encoded.set("permission_state", json.createObjectNode().put("schema_version", 1)
+                .put("next_id", 1).put("mutation_generation", 0).put("rules", "not-an-array"));
+        Files.writeString(file, json.writeValueAsString(encoded), StandardCharsets.UTF_8);
+        assertThrows(IOException.class, () -> store.load(created.id()));
     }
 
     @Test

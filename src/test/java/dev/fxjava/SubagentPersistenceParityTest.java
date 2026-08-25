@@ -7,11 +7,14 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.nio.file.Path;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -71,6 +74,60 @@ class SubagentPersistenceParityTest {
             JsonNode settled = call(tool, inspect(id, true), "settled");
             assertEquals("idle", settled.path("requested").path("status").path("state").asText());
             assertEquals(List.of("unfinished"), resumedFactory.runners.get(0).executions);
+        }
+    }
+
+    @Test
+    void legacyAskChildWithoutAuthorityIsIsolatedWithoutAbortingRestore() throws Exception {
+        String id;
+        try (SubagentManager first = new SubagentManager(json, configuration -> prompt -> "unused",
+                PermissionMode.ASK, stateRoot, () -> "owner")) {
+            id = call(new SubagentTool(first), create("legacy", "persistent", null), "create-legacy")
+                    .path("child_id").asText();
+        }
+        Path savedFile = stateRoot.resolve("subagents").resolve(id + ".json");
+        ObjectNode saved = (ObjectNode) json.readTree(Files.readString(savedFile));
+        ((ObjectNode) saved.path("configuration")).remove("authority_session_id");
+        Files.writeString(savedFile, json.writeValueAsString(saved));
+        AtomicInteger factories = new AtomicInteger();
+
+        try (SubagentManager restored = new SubagentManager(json, configuration -> {
+            factories.incrementAndGet();
+            return prompt -> "must not run";
+        }, PermissionMode.ASK, stateRoot)) {
+            restored.restore();
+            JsonNode status = call(new SubagentTool(restored), inspect(id, false), "inspect-isolated")
+                    .path("requested").path("status");
+            assertEquals("failed", status.path("state").asText());
+            assertTrue(status.path("failure_reason").asText().contains("permission_authority_unavailable"));
+            assertEquals(0, factories.get());
+        }
+    }
+
+    @Test
+    void unavailableOwnerIsolatesOnlyItsChild() throws Exception {
+        String askId;
+        String yoloId;
+        try (SubagentManager first = new SubagentManager(json, configuration -> prompt -> "unused",
+                PermissionMode.YOLO, stateRoot, () -> "deleted-owner")) {
+            ObjectNode ask = create("owned", "persistent", null);
+            ((ObjectNode) ask.path("command").path("create")).put("permission_mode", "ask");
+            askId = call(new SubagentTool(first), ask, "create-owned").path("child_id").asText();
+            ObjectNode yolo = create("independent", "persistent", null);
+            ((ObjectNode) yolo.path("command").path("create")).put("permission_mode", "yolo");
+            yoloId = call(new SubagentTool(first), yolo, "create-yolo").path("child_id").asText();
+        }
+
+        try (SubagentManager restored = new SubagentManager(json, configuration -> {
+            if (configuration.permissionMode() != PermissionMode.YOLO) throw new IOException("owner deleted");
+            return prompt -> "available";
+        }, PermissionMode.YOLO, stateRoot)) {
+            restored.restore();
+            SubagentTool tool = new SubagentTool(restored);
+            assertEquals("failed", call(tool, inspect(askId, false), "inspect-owned")
+                    .path("requested").path("status").path("state").asText());
+            assertEquals("idle", call(tool, inspect(yoloId, false), "inspect-yolo")
+                    .path("requested").path("status").path("state").asText());
         }
     }
 

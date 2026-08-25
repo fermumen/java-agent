@@ -50,6 +50,10 @@ class SlashCommandsTest {
         assertEquals("/mcp", SlashCommands.resolve("/mcp status").command);
         assertNull(SlashCommands.resolve("plain prompt"));
         assertNull(SlashCommands.resolve("/zz"));
+        assertEquals("/permissions", SlashCommands.resolve(
+                "/permissions remember allow write_file {\"path\":\"a\"}").command,
+                "nested metadata must not steal dispatch from the base command parser");
+        assertEquals("/permissions", SlashCommands.resolve("/permissions\trevoke 1").command);
     }
 
     @Test
@@ -69,7 +73,7 @@ class SlashCommandsTest {
     @Test
     void catalogAlignsUsageAndDimsDescriptions() {
         String catalog = SlashCommands.catalog("", 80, Ansi.of(true));
-        assertTrue(catalog.contains("  /resume <id|last>   "),
+        assertTrue(catalog.contains("  /resume <id|last>  "),
                 "usage column is padded: " + catalog);
         assertTrue(catalog.contains("\u001b[2mresume a saved session\u001b[0m"));
     }
@@ -103,7 +107,8 @@ class SlashCommandsTest {
         String catalog = SlashCommands.catalog(null, 120, Ansi.of(false));
         for (String command : new String[]{"/help", "/clear", "/new", "/sessions", "/resume <id|last>",
                 "/recover <id>", "/rename <title>", "/mcp [list|status]", "/exit", "/model",
-                "/permissions", "/status"}) {
+                "/permissions", "/permissions remember <allow|deny> <tool-name> <arguments-json>",
+                "/permissions revoke <id>", "/status"}) {
             assertTrue(catalog.contains(command), "missing " + command);
         }
     }

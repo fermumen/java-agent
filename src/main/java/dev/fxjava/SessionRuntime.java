@@ -11,12 +11,19 @@ final class SessionRuntime {
     private Agent agent;
     private final SessionStore store;
     private SessionStore.Snapshot snapshot;
+    private volatile SessionRules rules;
 
     private SessionRuntime(Agent agent, SessionStore store, SessionStore.Snapshot snapshot) {
         this.agent = agent;
         this.store = store;
         this.snapshot = snapshot;
         agent.setToolResultSession(snapshot == null ? null : snapshot.id());
+    }
+
+    private SessionRuntime(Agent agent, SessionStore store, SessionStore.Snapshot snapshot,
+                           SessionRules rules) {
+        this(agent, store, snapshot);
+        this.rules = rules;
     }
 
     static SessionRuntime start(Agent agent, SessionStore store, Path workspace, String model,
@@ -32,9 +39,10 @@ final class SessionRuntime {
                 throw new IOException("Session " + snapshot.id() + " belongs to workspace "
                         + snapshot.workspace() + ", not " + canonicalWorkspace);
             }
-            agent.restoreConversation(snapshot.input(), snapshot.instructions());
         }
-        return new SessionRuntime(agent, store, snapshot);
+        SessionRules rules = snapshot.rules();
+        if (resume != null) agent.restoreConversation(snapshot.input(), snapshot.instructions());
+        return new SessionRuntime(agent, store, snapshot, rules);
     }
 
     String prompt(String input) throws IOException, InterruptedException {
@@ -86,32 +94,66 @@ final class SessionRuntime {
         return store != null;
     }
 
+    /** Exact-match permission rules bound to the active saved session; null without persistence. */
+    SessionRules rules() {
+        return rules;
+    }
+
+    synchronized String rememberRule(SessionRules.Kind kind, String tool, String arguments) throws IOException {
+        requirePersistence();
+        SessionRules candidate = rules.copy();
+        long expectedGeneration = candidate.generation();
+        String id = candidate.remember(kind, tool, arguments);
+        if (id == null) return null;
+        snapshot = store.updateRules(snapshot, candidate, expectedGeneration);
+        rules = snapshot.rules();
+        return id;
+    }
+
+    synchronized boolean revokeRule(String id) throws IOException {
+        requirePersistence();
+        SessionRules candidate = rules.copy();
+        long expectedGeneration = candidate.generation();
+        if (!candidate.revoke(id)) return false;
+        snapshot = store.updateRules(snapshot, candidate, expectedGeneration);
+        rules = snapshot.rules();
+        return true;
+    }
+
     List<SessionStore.Snapshot> sessions(Path workspace, int limit) throws IOException {
         return store == null ? List.of() : store.list(workspace, limit);
     }
 
-    void newSession(Path workspace, String model, String instructions) throws IOException {
+    synchronized void newSession(Path workspace, String model, String instructions) throws IOException {
         requirePersistence();
+        SessionStore.Snapshot created = store.create(workspace, model, instructions);
+        SessionRules createdRules = created.rules();
         agent.clearConversation(instructions);
-        snapshot = store.create(workspace, model, instructions);
-        agent.setToolResultSession(snapshot.id());
+        snapshot = created;
+        rules = createdRules;
+        agent.setToolResultSession(created.id());
     }
 
-    void resume(String id, Path workspace) throws IOException {
+    synchronized void resume(String id, Path workspace) throws IOException {
         requirePersistence();
         SessionStore.Snapshot loaded = id.equals("last") ? store.latest(workspace) : store.load(id);
         requireWorkspace(loaded, workspace);
+        SessionRules loadedRules = loaded.rules();
         agent.restoreConversation(loaded.input(), loaded.instructions());
         snapshot = loaded;
+        rules = loadedRules;
         agent.setToolResultSession(snapshot.id());
     }
 
-    void recover(String id, Path workspace) throws IOException {
+    synchronized void recover(String id, Path workspace) throws IOException {
         requirePersistence();
+        SessionStore.Snapshot source = store.load(id);
+        requireWorkspace(source, workspace);
         SessionStore.Snapshot recovered = store.recover(id);
-        requireWorkspace(recovered, workspace);
+        SessionRules recoveredRules = recovered.rules();
         agent.restoreConversation(recovered.input(), recovered.instructions());
         snapshot = recovered;
+        rules = recoveredRules;
         agent.setToolResultSession(snapshot.id());
     }
 
@@ -138,7 +180,10 @@ final class SessionRuntime {
     }
 
     private void persist() throws IOException {
-        if (store != null) snapshot = store.update(snapshot, agent.snapshotInput(), agent.instructions());
+        if (store != null) {
+            snapshot = store.update(snapshot, agent.snapshotInput(), agent.instructions());
+            rules = snapshot.rules();
+        }
     }
 
     private void requirePersistence() {

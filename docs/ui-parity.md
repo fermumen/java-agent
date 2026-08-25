@@ -69,3 +69,56 @@ window. The markdown parser is deliberately shallow (no setext headings,
 nested lists, alignment colons, or reference links), and during generation
 every decoded key except Ctrl+C and printable text is dropped rather than
 queued. Those remain parity work alongside the full-screen UI.
+
+## Permission rules
+
+The shell remembers persistent, exact-match permission rules bound to the
+active saved session, porting fx's `/permissions remember` contract:
+`/permissions remember allow|deny <tool-name> <arguments-json>` stores one
+rule and confirms its stable numeric id, bare `/permissions` prints the current
+mode plus a table of active rules (id, kind, tool, arguments) sorted stably by
+id, and `/permissions revoke <id>` removes a rule by exact id with a friendly
+message for unknown ids. A rule's identity is the tool name plus the
+arguments JSON canonicalized with recursively sorted object keys and compact
+serialization, so the same arguments match despite source key order or
+insignificant spacing while different values, including whitespace inside
+strings, do not. Tool names are matched exactly and case-sensitively. Rules
+persist inside the authoritative atomic `session.json` schema-v3 snapshot,
+survive restart and resume, belong to exactly one saved session (`/new` starts
+with explicit empty state, `/resume` loads that session's state, and `/recover`
+copies the source rules to its new session id), and are refused under
+`--no-save`. Schema-v1/v2 snapshots migrate missing permission state to
+explicit empty state when next saved; schema v3 fails closed when permission
+state is missing or corrupt. Recovery stages and validates the complete
+snapshot and referenced artifacts before promoting the recovered directory or
+changing `latest`. Persistence uses ordinary atomic file replacement and does
+not depend on `SecureDirectoryStream`, so sessions remain provider-independent
+and portable to Windows. Permission state allows at most 1024 rules, a
+256-byte tool name, and a 4096-byte combined exact identity. Stable rule ids
+and mutation generation use separate checked counters; exhaustion is rejected
+before publication. Only one rule is active for an
+exact identity; remembering it again replaces the decision while preserving
+the id. JSON command arguments and snapshots reject duplicate keys, trailing
+values, and oversized input before tree parsing. Concurrent mutations on one
+runtime are serialized, while stale store writers are rejected by persisted
+generation. Consultation order wherever approvals are checked is: exact deny
+(blocked without prompting), exact allow (approved without prompting),
+non-persistent session `always` grants, then the normal prompt flow; yolo
+still bypasses everything. Session `always` grants are cleared only after a
+successful `/new`, `/resume`, or `/recover`; failed transitions retain them.
+Non-yolo subagents capture the owning root session's deny-only projection, so
+they preserve exact denies without inheriting remembered allows or `always`
+grants and do not follow a later root-session switch. Yolo children bypass the
+projection.
+
+Deliberate limits: there are no configured global rules, no
+auto-classifier/reviewer, no wildcards or patterns — matching is exact only —
+and no command-prefix admission. The fx-only `/permissions ask|auto|yolo|reset`
+modes are not implemented; mode stays fixed by CLI flag. The current slash
+popup only completes command tokens before the first space, so the nested
+remember/revoke entries appear in `/help` but not in a second-stage popup.
+Typed nested commands still dispatch through `/permissions` in both raw and
+legacy shells. The standalone `permissions` info command has no active saved
+session and therefore reports no rule scope; it does not load global rules.
+ACP rule enforcement is deliberately out of scope, so ACP remains a known
+transport parity gap rather than part of this TUI permission contract.

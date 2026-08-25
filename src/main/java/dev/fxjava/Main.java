@@ -40,6 +40,11 @@ public final class Main {
 
     static int run(String[] args, Map<String, String> environment, InputStream standardInput,
                    PrintStream out, PrintStream error) throws Exception {
+        return run(args, environment, standardInput, out, error, null);
+    }
+
+    static int run(String[] args, Map<String, String> environment, InputStream standardInput,
+                   PrintStream out, PrintStream error, ApprovalRouter approvalOverride) throws Exception {
         Options options = Options.parse(args);
         if (options.help) {
             out.print(usage());
@@ -80,7 +85,8 @@ public final class Main {
         ObjectMapper json = new ObjectMapper();
         BufferedReader input = new BufferedReader(new InputStreamReader(standardInput));
         Console console = System.console();
-        ApprovalRouter approval = new ApprovalRouter(approvalPolicy(config, input, error, console));
+        ApprovalRouter approval = approvalOverride == null
+                ? new ApprovalRouter(approvalPolicy(config, input, error, console)) : approvalOverride;
         String configuredRoot = firstNonBlank(options.sessionRoot, environment.get("JAVA_AGENT_HOME"));
         Path sessionRoot = configuredRoot == null
                 ? Path.of(System.getProperty("user.home"), ".java-agent") : Path.of(configuredRoot);
@@ -100,20 +106,26 @@ public final class Main {
         agentTools.addAll(mcp.tools());
         AtomicReference<List<Tool>> childTools = new AtomicReference<>();
         AtomicReference<SubagentManager> subagentRuntime = new AtomicReference<>();
+        AtomicReference<SessionRuntime> activeSession = new AtomicReference<>();
         try (SubagentManager subagents = new SubagentManager(json, child ->
                 new SubagentAgentRunner(json, config.apiKey(), config.baseUrl(), config.model(),
-                        config.workspace(), config.maxSteps(), sessionRoot, childTools, approval, error, child,
+                        config.workspace(), config.maxSteps(), sessionRoot, childTools,
+                        approval.childAuthority(authorityRules(child, activeSession.get(), store)),
+                        error, child,
                         subagentRuntime.get().parentContext(child.id())),
-                permissionMode, options.noSave ? null : sessionRoot)) {
+                permissionMode, options.noSave ? null : sessionRoot,
+                () -> activeSession.get() == null ? null : activeSession.get().id())) {
         subagentRuntime.set(subagents);
         agentTools.add(new SubagentTool(subagents));
         childTools.set(List.copyOf(agentTools));
-        subagents.restore();
         Agent agent = new Agent(json, new OpenAiResponsesClient(json, config),
                 agentTools, approval, error, config.maxSteps(), systemPrompt, resultStore,
                 subagents.parentContext("root"));
         SessionRuntime session = SessionRuntime.start(agent, store, config.workspace(), config.model(),
                 systemPrompt, options.resume);
+        approval.bindRules(session::rules, config.approveAll());
+        activeSession.set(session);
+        subagents.restore();
 
         if (!options.prompt.isBlank()) {
             writeAnswer(session, options.prompt, out, options.json, json);
@@ -136,7 +148,7 @@ public final class Main {
         out.println("java-agent " + VERSION + " | Responses API | " + config.model()
                 + " | " + config.workspace());
         if (session.id() != null) out.println("Session: " + session.id());
-        out.println("Enter a request. Commands: /new, /clear, /sessions, /resume <id|last>, /recover <id>, /rename <title>, /mcp list, /exit");
+        out.println("Enter a request. Commands: /new, /clear, /sessions, /resume <id|last>, /recover <id>, /rename <title>, /permissions, /mcp list, /exit");
         while (true) {
             out.print("> ");
             out.flush();
@@ -154,13 +166,16 @@ public final class Main {
                 out.println("Conversation cleared.");
             } else if (line.equals("/new")) {
                 session.newSession(config.workspace(), config.model(), systemPrompt);
+                approval.clearSessionGrants();
                 out.println("New session: " + session.id());
             } else if (line.equals("/resume") || line.startsWith("/resume ")) {
                 String id = line.equals("/resume") ? "last" : line.substring("/resume ".length()).trim();
                 session.resume(id, config.workspace());
+                approval.clearSessionGrants();
                 out.println("Resumed session: " + session.id());
             } else if (line.startsWith("/recover ")) {
                 session.recover(line.substring("/recover ".length()).trim(), config.workspace());
+                approval.clearSessionGrants();
                 out.println("Recovered as: " + session.id());
             } else if (line.equals("/sessions")) {
                 List<SessionStore.Snapshot> snapshots = session.sessions(config.workspace(), 20);
@@ -173,6 +188,11 @@ public final class Main {
             } else if (line.startsWith("/rename ")) {
                 session.rename(line.substring("/rename ".length()));
                 out.println("Session renamed.");
+            } else if (isCommand(line, "/permissions")) {
+                PermissionCommands.handle(session,
+                        line.substring("/permissions".length()),
+                        config.permissionMode().name().toLowerCase(java.util.Locale.ROOT),
+                        approval.grantCount(), Ansi.of(false), out);
             } else if (line.equals("/mcp") || line.equals("/mcp list")) {
                 out.print(mcp.healthText());
             } else if (!line.isBlank()) {
@@ -239,7 +259,7 @@ public final class Main {
             case "permissions": {
                 result.put("mode", mode.name().toLowerCase(java.util.Locale.ROOT))
                         .put("grant_count", 0).put("grant_scope", "session")
-                        .put("runtime_grants_available", false).put("rules_scope", "persistent_config");
+                        .put("runtime_grants_available", false).put("rules_scope", "none");
                 result.putArray("rules");
                 result.putArray("grants");
                 break;
@@ -382,6 +402,24 @@ public final class Main {
 
     private static boolean notBlank(String value) {
         return value != null && !value.isBlank();
+    }
+
+    private static boolean isCommand(String line, String command) {
+        return line.equals(command) || (line.startsWith(command) && line.length() > command.length()
+                && Character.isWhitespace(line.charAt(command.length())));
+    }
+
+    private static SessionRules authorityRules(SubagentManager.ChildConfiguration child,
+                                               SessionRuntime active, SessionStore store)
+            throws IOException {
+        if (child.permissionMode() == PermissionMode.YOLO) return new SessionRules();
+        String ownerId = child.authoritySessionId();
+        if (ownerId == null) {
+            if (store != null) throw new IOException("Subagent permission authority has no owning session");
+            return new SessionRules();
+        }
+        if (active != null && ownerId.equals(active.id())) return active.rules();
+        return store == null ? new SessionRules() : store.loadRules(ownerId);
     }
 
     private static String firstNonBlank(String... values) {
