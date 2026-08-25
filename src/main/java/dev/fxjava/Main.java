@@ -148,7 +148,7 @@ public final class Main {
         out.println("java-agent " + VERSION + " | Responses API | " + config.model()
                 + " | " + config.workspace());
         if (session.id() != null) out.println("Session: " + session.id());
-        out.println("Enter a request. Commands: /new, /clear, /sessions, /resume <id|last>, /recover <id>, /rename <title>, /permissions, /mcp list, /exit");
+        out.println("Enter a request. Commands: /new, /clear, /sessions, /resume <id|last>, /recover <id>, /rename <title>, /permissions, /stats, /compact, /mcp list, /exit");
         while (true) {
             out.print("> ");
             out.flush();
@@ -193,6 +193,12 @@ public final class Main {
                         line.substring("/permissions".length()),
                         config.permissionMode().name().toLowerCase(java.util.Locale.ROOT),
                         approval.grantCount(), Ansi.of(false), out);
+            } else if (isCommand(line, "/stats")) {
+                StatsCommands.handle(session, line.substring("/stats".length()), workspace,
+                        Ansi.of(false), out);
+            } else if (isCommand(line, "/compact")) {
+                CompactCommands.handle(session, line.substring("/compact".length()),
+                        Ansi.of(false), out, error);
             } else if (line.equals("/mcp") || line.equals("/mcp list")) {
                 out.print(mcp.healthText());
             } else if (!line.isBlank()) {
@@ -339,11 +345,21 @@ public final class Main {
                                     boolean structured, ObjectMapper json)
             throws IOException, InterruptedException {
         boolean[] streamed = { false };
+        long[] turnUsage = new long[2];
         String answer = session.prompt(prompt, delta -> {
             if (!structured) {
                 streamed[0] = true;
                 out.print(delta);
                 out.flush();
+            }
+        }, new Agent.TurnListener() {
+            @Override public void onToolStart(String name, String preview) { }
+
+            @Override public void onToolEnd(String name, boolean error) { }
+
+            @Override public void onUsage(long inputTokens, long outputTokens) {
+                turnUsage[0] += inputTokens;
+                turnUsage[1] += outputTokens;
             }
         });
         if (structured) {
@@ -354,8 +370,11 @@ public final class Main {
                 calls.addObject().put("name", call.name()).put("status", call.status());
             }
             out.println(json.writeValueAsString(result));
-        } else if (streamed[0]) out.println();
-        else if (!answer.isBlank()) out.println(answer);
+        } else {
+            if (streamed[0]) out.println();
+            else if (!answer.isBlank()) out.println(answer);
+            out.println("tokens: " + StatsCommands.format(turnUsage[0], turnUsage[1]));
+        }
     }
 
     private static ApprovalPolicy approvalPolicy(AgentConfig config, BufferedReader input,

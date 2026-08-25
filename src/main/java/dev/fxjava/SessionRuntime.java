@@ -1,5 +1,7 @@
 package dev.fxjava;
 
+import com.fasterxml.jackson.databind.node.ArrayNode;
+
 import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.file.Path;
@@ -12,6 +14,7 @@ final class SessionRuntime {
     private final SessionStore store;
     private SessionStore.Snapshot snapshot;
     private volatile SessionRules rules;
+    private SessionUsage usage = SessionUsage.zeroed();
 
     private SessionRuntime(Agent agent, SessionStore store, SessionStore.Snapshot snapshot) {
         this.agent = agent;
@@ -24,6 +27,7 @@ final class SessionRuntime {
                            SessionRules rules) {
         this(agent, store, snapshot);
         this.rules = rules;
+        this.usage = snapshot == null ? SessionUsage.zeroed() : snapshot.usage();
     }
 
     static SessionRuntime start(Agent agent, SessionStore store, Path workspace, String model,
@@ -55,18 +59,45 @@ final class SessionRuntime {
 
     String prompt(String input, Consumer<String> textDelta, Agent.TurnListener turnListener)
             throws IOException, InterruptedException {
+        java.util.concurrent.atomic.AtomicLong inputTokens = new java.util.concurrent.atomic.AtomicLong();
+        java.util.concurrent.atomic.AtomicLong outputTokens = new java.util.concurrent.atomic.AtomicLong();
+        Agent.TurnListener usageListener = wrapWithUsage(turnListener, inputTokens, outputTokens);
         try {
-            String answer = agent.prompt(input, textDelta, turnListener);
-            persist();
+            String answer = agent.prompt(input, textDelta, usageListener);
+            persist(inputTokens.getAndSet(0), outputTokens.getAndSet(0));
             return answer;
         } catch (IOException | InterruptedException primary) {
             try {
-                persist();
+                persist(inputTokens.getAndSet(0), outputTokens.getAndSet(0));
             } catch (IOException persistenceFailure) {
                 primary.addSuppressed(persistenceFailure);
             }
             throw primary;
         }
+    }
+
+    /**
+     * Forwards tool events untouched and captures per-turn usage deltas so
+     * they fold into the same locked snapshot write as the conversation.
+     */
+    private static Agent.TurnListener wrapWithUsage(Agent.TurnListener listener,
+                                                    java.util.concurrent.atomic.AtomicLong inputTokens,
+                                                    java.util.concurrent.atomic.AtomicLong outputTokens) {
+        return new Agent.TurnListener() {
+            @Override public void onToolStart(String name, String preview) {
+                listener.onToolStart(name, preview);
+            }
+
+            @Override public void onToolEnd(String name, boolean error) {
+                listener.onToolEnd(name, error);
+            }
+
+            @Override public void onUsage(long input, long output) {
+                inputTokens.addAndGet(input);
+                outputTokens.addAndGet(output);
+                listener.onUsage(input, output);
+            }
+        };
     }
 
     void setToolProgress(PrintStream progress) {
@@ -75,7 +106,7 @@ final class SessionRuntime {
 
     void clear(String instructions) throws IOException {
         agent.clearConversation(instructions);
-        persist();
+        persist(0, 0);
     }
 
     List<Agent.ToolCallRecord> lastToolCalls() {
@@ -97,6 +128,11 @@ final class SessionRuntime {
     /** Exact-match permission rules bound to the active saved session; null without persistence. */
     SessionRules rules() {
         return rules;
+    }
+
+    /** Cumulative token totals for the active session, persisted when saving is enabled. */
+    SessionUsage usage() {
+        return usage;
     }
 
     synchronized String rememberRule(SessionRules.Kind kind, String tool, String arguments) throws IOException {
@@ -124,6 +160,62 @@ final class SessionRuntime {
         return store == null ? List.of() : store.list(workspace, limit);
     }
 
+    /**
+     * Saved sessions across every workspace: a recency-bounded slice for
+     * all-time aggregations plus the total found before the cap was applied.
+     */
+    AllSessions allTimeSessions(int limit) throws IOException {
+        if (store == null) return new AllSessions(List.of(), 0);
+        SessionStore.BoundedListing listing = store.listBounded(null, limit);
+        return new AllSessions(listing.sessions(), listing.totalFound());
+    }
+
+    /** Bounded recency slice plus how many saved sessions existed before capping. */
+    static final class AllSessions {
+        private final List<SessionStore.Snapshot> sessions;
+        private final int totalFound;
+
+        AllSessions(List<SessionStore.Snapshot> sessions, int totalFound) {
+            this.sessions = sessions;
+            this.totalFound = totalFound;
+        }
+
+        List<SessionStore.Snapshot> sessions() { return sessions; }
+        int totalFound() { return totalFound; }
+    }
+
+    /** Deep copy of the live conversation items, safe for inspection and rebuilds. */
+    ArrayNode conversation() {
+        return agent.snapshotInput();
+    }
+
+    /**
+     * One extra non-polluting model completion used by /compact: no tools,
+     * nothing appended to the conversation, no durable write. The returned
+     * result carries the round-trip's own token usage so callers can meter it.
+     */
+    Agent.SummarizeResult summarizeWithUsage(String content) throws IOException, InterruptedException {
+        return agent.summarizeWithUsage(content, ConversationCompactor.SUMMARIZER_INSTRUCTIONS);
+    }
+
+    /** Same seam as {@link #summarizeWithUsage}, discarding the usage figures. */
+    String summarize(String content) throws IOException, InterruptedException {
+        return summarizeWithUsage(content).summary;
+    }
+
+    /**
+     * Persists a rebuilt conversation (e.g. post-compaction) through the store
+     * first — the on-disk snapshot is authoritative — and only then swaps it
+     * into the live agent, folding any usage deltas into the same locked
+     * write. If the persist fails the live conversation is never touched, so
+     * callers can report failure truthfully.
+     */
+    synchronized void applyCompaction(ArrayNode rebuiltInput,
+                                      long inputTokenDelta, long outputTokenDelta) throws IOException {
+        persistWith(rebuiltInput, inputTokenDelta, outputTokenDelta);
+        agent.restoreConversation(rebuiltInput, agent.instructions());
+    }
+
     synchronized void newSession(Path workspace, String model, String instructions) throws IOException {
         requirePersistence();
         SessionStore.Snapshot created = store.create(workspace, model, instructions);
@@ -131,6 +223,7 @@ final class SessionRuntime {
         agent.clearConversation(instructions);
         snapshot = created;
         rules = createdRules;
+        usage = created.usage();
         agent.setToolResultSession(created.id());
     }
 
@@ -139,9 +232,11 @@ final class SessionRuntime {
         SessionStore.Snapshot loaded = id.equals("last") ? store.latest(workspace) : store.load(id);
         requireWorkspace(loaded, workspace);
         SessionRules loadedRules = loaded.rules();
+        SessionUsage loadedUsage = loaded.usage();
         agent.restoreConversation(loaded.input(), loaded.instructions());
         snapshot = loaded;
         rules = loadedRules;
+        usage = loadedUsage;
         agent.setToolResultSession(snapshot.id());
     }
 
@@ -151,23 +246,31 @@ final class SessionRuntime {
         requireWorkspace(source, workspace);
         SessionStore.Snapshot recovered = store.recover(id);
         SessionRules recoveredRules = recovered.rules();
+        SessionUsage recoveredUsage = recovered.usage();
         agent.restoreConversation(recovered.input(), recovered.instructions());
         snapshot = recovered;
         rules = recoveredRules;
+        usage = recoveredUsage;
         agent.setToolResultSession(snapshot.id());
     }
 
     void rename(String title) throws IOException {
         requirePersistence();
         snapshot = store.rename(snapshot, title);
+        // The store re-reads authoritative state under the lock; adopt whatever
+        // it returned so local rules/usage never go stale across the rename.
+        rules = snapshot.rules();
+        usage = snapshot.usage();
     }
 
     void reconfigure(Agent replacement, String model, String instructions) throws IOException {
         replacement.restoreConversation(agent.snapshotInput(), instructions);
-        SessionStore.Snapshot updated = store == null ? null
-                : store.reconfigure(snapshot, model, replacement.snapshotInput(), instructions);
+        if (store != null) {
+            snapshot = store.reconfigure(snapshot, model, replacement.snapshotInput(), instructions);
+            rules = snapshot.rules();
+            usage = snapshot.usage();
+        }
         agent = replacement;
-        if (store != null) snapshot = updated;
         agent.setToolResultSession(snapshot == null ? null : snapshot.id());
     }
 
@@ -179,10 +282,20 @@ final class SessionRuntime {
         }
     }
 
-    private void persist() throws IOException {
+    private void persist(long inputTokenDelta, long outputTokenDelta) throws IOException {
+        persistWith(agent.snapshotInput(), inputTokenDelta, outputTokenDelta);
+    }
+
+    private void persistWith(ArrayNode input, long inputTokenDelta, long outputTokenDelta) throws IOException {
         if (store != null) {
-            snapshot = store.update(snapshot, agent.snapshotInput(), agent.instructions());
+            snapshot = store.update(snapshot, input, agent.instructions(),
+                    inputTokenDelta, outputTokenDelta);
             rules = snapshot.rules();
+            usage = snapshot.usage();
+            return;
+        }
+        if (inputTokenDelta != 0 || outputTokenDelta != 0) {
+            usage = usage.added(inputTokenDelta, outputTokenDelta);
         }
     }
 

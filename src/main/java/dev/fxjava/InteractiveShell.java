@@ -1,5 +1,7 @@
 package dev.fxjava;
 
+import com.fasterxml.jackson.databind.node.ArrayNode;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -376,6 +378,13 @@ final class InteractiveShell implements QuestionFlow {
             case "/status":
                 printStatus();
                 break;
+            case "/stats":
+                StatsCommands.handle(session, argumentAfter(line, "/stats"), config.workspace(),
+                        ansi, out);
+                break;
+            case "/compact":
+                compact(argumentAfter(line, "/compact"));
+                break;
             case "/mcp":
                 mcpHealth(argumentAfter(line, "/mcp"));
                 break;
@@ -437,6 +446,7 @@ final class InteractiveShell implements QuestionFlow {
         AtomicBoolean streamed = new AtomicBoolean();
         AtomicReference<String> answer = new AtomicReference<>("");
         AtomicReference<IOException> failure = new AtomicReference<>();
+        long[] turnUsage = new long[2];
         Thread generator = new Thread(() -> {
             try {
                 String result = session.prompt(prompt, delta -> {
@@ -449,6 +459,11 @@ final class InteractiveShell implements QuestionFlow {
 
                     @Override public void onToolEnd(String name, boolean error) {
                         presenter.onToolEnd(name, error);
+                    }
+
+                    @Override public void onUsage(long inputTokens, long outputTokens) {
+                        turnUsage[0] += inputTokens;
+                        turnUsage[1] += outputTokens;
                     }
                 });
                 answer.set(result);
@@ -480,8 +495,83 @@ final class InteractiveShell implements QuestionFlow {
             return;
         }
         if (cancelled.get()) return;
+        printTurnUsage(turnUsage[0], turnUsage[1]);
         if (streamed.get()) return;
         if (!answer.get().isBlank()) out.println(new MarkdownConsole(ansi).render(answer.get(), columns));
+    }
+
+    /** Dim per-turn totals line; printed only after the spinner is fully erased. */
+    private void printTurnUsage(long inputTokens, long outputTokens) {
+        out.println(ansi.dim() + "tokens: " + StatsCommands.format(inputTokens, outputTokens)
+                + ansi.reset());
+        out.flush();
+    }
+
+    /**
+     * /compact runs the same worker-thread pattern as generation so Ctrl+C
+     * interrupts the summarization call mid-flight; the conversation only
+     * changes after the round-trip and its immediate persistence succeed.
+     */
+    private void compact(String argument) throws IOException, InterruptedException {
+        if (!argument.isEmpty()) {
+            out.println(CompactCommands.USAGE);
+            return;
+        }
+        ArrayNode input = session.conversation();
+        if (!ConversationCompactor.eligible(input)) {
+            out.println(CompactCommands.refusalLine(input));
+            return;
+        }
+        if (!session.persistent()) {
+            out.println(ansi.dim()
+                    + "Session persistence is disabled by --no-save; compacting in memory only."
+                    + ansi.reset());
+        }
+        cancelled.set(false);
+        refreshColumns(false);
+        Spinner spinner = new Spinner(out, ansi, clock, SPINNER_INTERVAL_NANOS);
+        TranscriptPresenter presenter = new TranscriptPresenter(out, ansi, columns, spinner);
+        AtomicReference<CompactCommands.Result> result = new AtomicReference<>();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread compactor = new Thread(() -> {
+            try {
+                result.set(CompactCommands.run(session, ""));
+            } catch (InterruptedException interrupted) {
+                cancelled.set(true);
+                Thread.currentThread().interrupt();
+            } catch (Throwable failed) {
+                // Any unexpected error lands in the friendly failure slot
+                // instead of killing the worker (and with it the shell).
+                failure.set(failed);
+            }
+        }, "conversation-compaction");
+        worker = compactor;
+        activePresenter = presenter;
+        try {
+            presenter.begin();
+            compactor.start();
+            watchDuringGeneration(compactor, presenter);
+            compactor.join();
+        } finally {
+            activePresenter = null;
+            worker = null;
+            presenter.finish();
+        }
+        Throwable failed = failure.get();
+        if (failed != null) {
+            error.println("java-agent: compaction failed: " + describe(failed));
+            return;
+        }
+        if (cancelled.get()) {
+            out.println("Compaction cancelled; conversation untouched.");
+            return;
+        }
+        out.println(ansi.dim() + CompactCommands.confirmation(result.get()) + ansi.reset());
+    }
+
+    private static String describe(Throwable failed) {
+        String message = failed.getMessage();
+        return message == null || message.isBlank() ? failed.getClass().getSimpleName() : message;
     }
 
     /**
@@ -809,7 +899,8 @@ final class InteractiveShell implements QuestionFlow {
 
     private void refreshColumns(boolean force) {
         if (!sizeGate.due(force)) return;
-        TerminalCapabilities.Size current = capabilities.size();
+        TerminalCapabilities.Size current = capabilities == null
+                ? TerminalCapabilities.Size.FALLBACK : capabilities.size();
         columns = current.known() ? current.columns : TerminalCapabilities.Size.FALLBACK.columns;
     }
 }

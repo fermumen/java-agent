@@ -1,14 +1,22 @@
 package dev.fxjava;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 final class FakeResponsesServer implements AutoCloseable {
+    /** Input item types the real Responses API accepts; anything else is a 400. */
+    private static final Set<String> VALID_INPUT_TYPES = Set.of(
+            "", "message", "function_call", "function_call_output", "reasoning",
+            "item_reference");
+    private static final ObjectMapper JSON = new ObjectMapper();
     private static final String TOOL_RESPONSE =
             "{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"output\":[\n"
             + "  {\"id\":\"rs_1\",\"type\":\"reasoning\",\"encrypted_content\":\"encrypted-state\",\"summary\":[]},\n"
@@ -45,6 +53,7 @@ final class FakeResponsesServer implements AutoCloseable {
     private void handle(HttpExchange exchange) throws IOException {
         String request = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
         int number = requests.incrementAndGet();
+        if (rejectUnknownInputTypes(exchange, request)) return;
         if (!request.contains("\"store\":false")
                 || !request.contains("\"stream\":true")
                 || !request.contains("reasoning.encrypted_content")
@@ -72,6 +81,29 @@ final class FakeResponsesServer implements AutoCloseable {
         exchange.sendResponseHeaders(200, body.length);
         exchange.getResponseBody().write(body);
         exchange.close();
+    }
+
+    /** Rejects input items whose type the real Responses API would refuse. */
+    private static boolean rejectUnknownInputTypes(HttpExchange exchange, String request)
+            throws IOException {
+        JsonNode input;
+        try {
+            input = JSON.readTree(request).path("input");
+        } catch (IOException malformed) {
+            return false;
+        }
+        if (!input.isArray()) return false;
+        for (JsonNode item : input) {
+            String type = item.path("type").asText("");
+            if (VALID_INPUT_TYPES.contains(type)) continue;
+            byte[] error = ("unknown input item type: " + type).getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            exchange.sendResponseHeaders(400, error.length);
+            exchange.getResponseBody().write(error);
+            exchange.close();
+            return true;
+        }
+        return false;
     }
 
     private static String completed(String response) {

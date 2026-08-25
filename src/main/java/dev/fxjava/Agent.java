@@ -36,11 +36,22 @@ public final class Agent {
     private final ParentContext parentContext;
     private TurnListener turnListener = TurnListener.NONE;
     private String instructions;
+    private long turnInputTokens;
+    private long turnOutputTokens;
 
     /** Observes tool activity within one prompt turn; implementations must not throw. */
     public interface TurnListener {
         void onToolStart(String name, String preview);
         void onToolEnd(String name, boolean error);
+
+        /**
+         * Delivered exactly once per prompt turn attempt with cumulative input
+         * and output token totals parsed from the Responses usage payload;
+         * zeros when the provider omitted usage. Successful turns deliver the
+         * full turn; failed turns (step-limit exhaustion, IO errors, or
+         * cancellation) finalize whatever the already-completed steps consumed.
+         */
+        default void onUsage(long inputTokens, long outputTokens) { }
 
         TurnListener NONE = new TurnListener() {
             @Override public void onToolStart(String name, String preview) { }
@@ -89,29 +100,83 @@ public final class Agent {
             throws IOException, InterruptedException {
         lastToolCalls.clear();
         turnListener = listener == null ? TurnListener.NONE : listener;
+        turnInputTokens = 0;
+        turnOutputTokens = 0;
         addUserMessage(input);
-        for (int step = 0; step < maxSteps; step++) {
-            ArrayNode requestInput = inputHistory.deepCopy();
-            PreparedParentContext prepared = parentContext == null ? null : parentContext.prepare();
-            if (prepared != null && !prepared.content().isBlank()) {
-                ObjectNode context = json.createObjectNode().put("role", "system")
-                        .put("content", prepared.content());
-                requestInput.insert(0, context);
-            }
-            ObjectNode response = client.complete(requestInput, buildToolDefinitions(toolCatalog), instructions, textDelta);
-            if (prepared != null) parentContext.acknowledge(prepared);
-            ArrayNode output = (ArrayNode) response.path("output");
-            List<JsonNode> functionCalls = new ArrayList<>();
+        try {
+            for (int step = 0; step < maxSteps; step++) {
+                ArrayNode requestInput = inputHistory.deepCopy();
+                // fx projects history-layer summaries into plain messages before
+                // any gateway call; the raw item never crosses the wire.
+                ConversationCompactor.projectSummariesForWire(requestInput);
+                PreparedParentContext prepared = parentContext == null ? null : parentContext.prepare();
+                if (prepared != null && !prepared.content().isBlank()) {
+                    ObjectNode context = json.createObjectNode().put("role", "system")
+                            .put("content", prepared.content());
+                    requestInput.insert(0, context);
+                }
+                ObjectNode response = client.complete(requestInput, buildToolDefinitions(toolCatalog),
+                        instructions, textDelta);
+                long[] usage = OpenAiResponsesClient.parseUsage(response);
+                turnInputTokens += usage[0];
+                turnOutputTokens += usage[1];
+                if (prepared != null) parentContext.acknowledge(prepared);
+                ArrayNode output = (ArrayNode) response.path("output");
+                List<JsonNode> functionCalls = new ArrayList<>();
 
-            for (JsonNode item : output) {
-                inputHistory.add(persistable(item));
-                if (item.path("type").asText().equals("function_call")) functionCalls.add(item);
-            }
+                for (JsonNode item : output) {
+                    inputHistory.add(persistable(item));
+                    if (item.path("type").asText().equals("function_call")) functionCalls.add(item);
+                }
 
-            if (functionCalls.isEmpty()) return extractOutputText(output);
-            for (JsonNode call : functionCalls) executeToolCall(call);
+                if (functionCalls.isEmpty()) return extractOutputText(output);
+                for (JsonNode call : functionCalls) executeToolCall(call);
+            }
+            throw new IOException("Agent stopped after reaching the " + maxSteps + " step limit");
+        } finally {
+            turnListener.onUsage(turnInputTokens, turnOutputTokens);
         }
-        throw new IOException("Agent stopped after reaching the " + maxSteps + " step limit");
+    }
+
+    /**
+     * One extra non-streaming completion with no tools that never touches the
+     * conversation state; the seam behind /compact's summarization round-trip.
+     */
+    public String summarize(String content, String instructions)
+            throws IOException, InterruptedException {
+        return summarizeWithUsage(content, instructions).summary;
+    }
+
+    /** Same seam as {@link #summarize}, plus the token usage the round-trip consumed. */
+    public SummarizeResult summarizeWithUsage(String content, String instructions)
+            throws IOException, InterruptedException {
+        ArrayNode input = json.createArrayNode();
+        ObjectNode message = input.addObject();
+        message.put("role", "user");
+        message.put("content", content);
+        ObjectNode response = client.complete(input, json.createArrayNode(), instructions);
+        long[] usage = OpenAiResponsesClient.parseUsage(response);
+        return new SummarizeResult(extractOutputText((ArrayNode) response.path("output")),
+                usage[0], usage[1]);
+    }
+
+    /** Summary text plus the input/output tokens its round-trip consumed. */
+    public static final class SummarizeResult {
+        public final String summary;
+        public final long inputTokens;
+        public final long outputTokens;
+
+        public SummarizeResult(String summary, long inputTokens, long outputTokens) {
+            this.summary = summary;
+            this.inputTokens = inputTokens;
+            this.outputTokens = outputTokens;
+        }
+
+        @Override
+        public String toString() {
+            return "SummarizeResult[summary=" + summary + ", input=" + inputTokens
+                    + ", output=" + outputTokens + "]";
+        }
     }
 
     public ArrayNode snapshotInput() {

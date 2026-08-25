@@ -112,4 +112,15 @@ class SlashCommandsTest {
             assertTrue(catalog.contains(command), "missing " + command);
         }
     }
+
+    @Test
+    void statsAndCompactAreRegisteredInTheirCategories() {
+        assertEquals("/stats", SlashCommands.resolve("/stats").command);
+        assertEquals(SlashCommands.Category.GENERAL, SlashCommands.resolve("/stats").category);
+        assertEquals("/compact", SlashCommands.resolve("/compact").command);
+        assertEquals(SlashCommands.Category.SESSION, SlashCommands.resolve("/compact").category);
+        String catalog = SlashCommands.catalog(null, 120, Ansi.of(false));
+        assertTrue(catalog.contains("/stats"));
+        assertTrue(catalog.contains("/compact"));
+    }
 }

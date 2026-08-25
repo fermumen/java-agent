@@ -217,6 +217,26 @@ public final class OpenAiResponsesClient implements ResponsesClient {
         return seconds * 1_000;
     }
 
+    /**
+     * fx responses_protocol.parseUsage: reads input_tokens/output_tokens off a
+     * completed response; absent, non-numeric, fractional, or negative fields
+     * count as zero. Returns {@code {input, output}}.
+     */
+    static long[] parseUsage(JsonNode response) {
+        JsonNode usage = response.path("usage");
+        if (!usage.isObject()) return new long[]{0, 0};
+        return new long[]{nonNegativeTokens(usage.get("input_tokens")),
+                nonNegativeTokens(usage.get("output_tokens"))};
+    }
+
+    private static long nonNegativeTokens(JsonNode value) {
+        if (value == null || !value.isIntegralNumber() || !value.canConvertToLong()
+                || value.longValue() < 0) {
+            return 0;
+        }
+        return value.longValue();
+    }
+
     static URI responsesEndpoint(String value) {
         String base = value.replaceAll("/+$", "");
         return URI.create(base.endsWith("/responses") ? base : base + "/responses");

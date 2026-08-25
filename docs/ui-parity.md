@@ -122,3 +122,79 @@ legacy shells. The standalone `permissions` info command has no active saved
 session and therefore reports no rule scope; it does not load global rules.
 ACP rule enforcement is deliberately out of scope, so ACP remains a known
 transport parity gap rather than part of this TUI permission contract.
+
+## Usage tracking
+
+Every completed turn reports token usage, porting fx's Responses usage parse
+(`responses_protocol.zig`): `input_tokens` and `output_tokens` are read from
+the `response.completed` payload's final `usage` object; absent, non-numeric,
+or negative fields count as zero, so providers without usage stay silent-safe.
+The per-turn totals reach the UI through a default `TurnListener.onUsage`
+method (existing listeners are unaffected) and accumulate across tool steps
+within one turn. After each completed generation the raw shell prints one dim
+line (`tokens: 1234 in · 567 out · 1801 total`) once the spinner is fully
+erased so frames never tear; the legacy loop prints the same line plain, and
+`ask --json` omits it to stay machine-readable. Cancelled or failed turns
+print nothing.
+
+Totals are cumulative per saved session and durable: they ride inside the
+authoritative atomic `session.json` snapshot as an embedded `usage_state`
+object beside permission state, written under the store lock in the same
+write as the conversation. Usage deltas fold into the on-disk totals at save
+time, so rule mutations and usage updates in one process never lose either
+change. Failed turns still count: the agent finalizes its per-turn
+accumulator even when a turn dies mid-flight (step-limit exhaustion, provider
+errors, Ctrl+C), so tokens already consumed by completed steps fold into the
+persisted totals through the same failure path, while the UI tokens line
+stays suppressed for anything but successful turns. `/compact` meters its own
+summarization round-trip into the same totals. Snapshots written before usage
+tracking have no `usage_state` field; they load as zeroed totals and gain
+explicit state when next saved, while a present but invalid field — including
+an explicit JSON null — fails closed instead of dropping history. Totals
+survive restart, resume, and recovery (recovered sessions copy the source's
+usage). Under `--no-save` the active session still tracks in-memory totals.
+
+Subagent child sessions run their own model loops, and their token spend does
+not yet contribute to the parent session's totals; child usage is visible
+only to the child (and in provider-side accounting) until forwarding is wired.
+
+`/stats` (General category, raw and legacy shells) prints the active session
+line, an all-time line summed across saved sessions on disk — when more than
+200 sessions exist it says "most recent 200 of N" rather than implying
+completeness — and a per-session breakdown of the ten most recent saved
+sessions for this workspace with the active session starred; a breakdown that
+cannot be loaded reports itself unavailable (it stays best-effort) instead of
+claiming no breakdown exists. Anything other than bare `/stats` earns a usage
+line.
+
+## Conversation compaction
+
+`/compact` (Session category, raw and legacy shells) ports fx's
+compacted_summary history turns: conversations below six items — or without
+more exchanges than the three kept verbatim — are refused with a friendly
+count. Otherwise exactly one extra model round-trip runs through the
+non-streaming client seam with no tools and nothing appended to durable
+conversation state: the transcript rendering folds any prior summary text
+ahead of a `[user]`/`[assistant]`/`[tool call]`/`[tool result]` rendering,
+bounded to 100 KiB by dropping oldest conversation lines first — the prior
+summary block itself is exempt from the budget (only conversation lines are
+trimmed against the remaining room), and a summary too large for even its
+reserved space is truncated with an explicit marker instead of being dropped.
+The summarization round-trip's own token usage folds into the session totals.
+On success the agent input history is rebuilt as one leading
+`{"type":"compacted_summary","summary_text":...,"compaction_count":N,
+"removed_item_count":M}` item plus the three most recent user/assistant/tool
+exchanges kept verbatim (tool call/output pairs never split), persisted
+before the live conversation is swapped so a persist failure leaves the
+session untouched, and confirmed with `Compacted: 24 → 6 items · compaction
+#1`. `removed_item_count` and `compaction_count` accumulate across folds, and
+the persisted write is store-level authoritative: it re-reads current rules
+and usage under the lock. The summary item stays on the
+history layer only (like fx): every Responses request projects it into a plain
+`{"role":"user","content":"[Summary of earlier conversation]\n..."}` message on
+the request copy, so the wire never carries the custom type. Re-compacting folds the old
+summary text into the summarizer prompt and increments the count inside the
+new item. Failures print `java-agent: compaction failed: ...` and leave the
+conversation byte-identical; Ctrl+C during the raw shell's compaction
+interrupts the worker exactly like generation and changes nothing. Under
+`--no-save` compaction works in memory only and says persistence is disabled.

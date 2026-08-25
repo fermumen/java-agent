@@ -79,7 +79,11 @@ final class SlashCommands {
                     "remember an exact rule for this saved session", Category.PERMISSIONS),
             new Spec("/permissions revoke", List.of(), "<id>", "revoke a remembered rule by id",
                     Category.PERMISSIONS),
-            new Spec("/mcp", List.of(), "[list|status]", "show MCP server health", Category.MCP));
+            new Spec("/mcp", List.of(), "[list|status]", "show MCP server health", Category.MCP),
+            new Spec("/stats", List.of(), "", "token totals for this and recent saved sessions",
+                    Category.GENERAL),
+            new Spec("/compact", List.of(), "", "summarize older history, keeping recent exchanges verbatim",
+                    Category.SESSION));
 
     static List<Spec> registry() {
         return REGISTRY;

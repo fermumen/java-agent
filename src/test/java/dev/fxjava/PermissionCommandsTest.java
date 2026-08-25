@@ -16,6 +16,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -197,6 +198,36 @@ class PermissionCommandsTest {
                 new PrintStream(PrintStream.nullOutputStream()), failedApproval));
         assertEquals(1, failedApproval.grantCount(),
                 "legacy failed transition retains the current session grant");
+    }
+
+    @Test
+    void renameRefreshesLocalRulesFromAnotherProcessWrite() throws Exception {
+        Path workspace = Files.createDirectory(temporary.resolve("workspace"));
+        Path state = temporary.resolve("state");
+        SessionStore store = new SessionStore(json, state);
+        SessionStore.Snapshot created = store.create(workspace, "model", "instructions");
+        // Two runtimes over the same store stand in for two processes.
+        SessionRuntime writer = SessionRuntime.start(agent(), store, workspace,
+                "model", "instructions", created.id());
+        SessionRuntime renamer = SessionRuntime.start(agent(), store, workspace,
+                "model", "instructions", created.id());
+        assertEquals(0, renamer.rules().count());
+
+        assertNotNull(writer.rememberRule(SessionRules.Kind.ALLOW, "write_file",
+                SessionRules.normalizeArguments(json.readTree("{\"path\":\"a.md\"}"))));
+        assertEquals(0, renamer.rules().count(),
+                "the stale runtime has not seen the other process's rule yet");
+
+        renamer.rename("renamed across processes");
+
+        assertEquals(1, renamer.rules().count(),
+                "rename adopts the authoritative rules the store returns");
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        PermissionCommands.handle(renamer, "", "ask", 0, Ansi.of(false),
+                new PrintStream(bytes, true, StandardCharsets.UTF_8));
+        String output = bytes.toString(StandardCharsets.UTF_8);
+        assertTrue(output.contains("rules=1"), output);
+        assertTrue(output.contains("write_file"), output);
     }
 
     private SessionRuntime runtime(Path workspace, Path state) throws IOException {
