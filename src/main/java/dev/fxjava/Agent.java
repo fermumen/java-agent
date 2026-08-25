@@ -30,11 +30,23 @@ public final class Agent {
     private final List<ToolCallRecord> lastToolCalls = new ArrayList<>();
     private final ArrayNode inputHistory;
     private final ApprovalPolicy approvalPolicy;
-    private final PrintStream progress;
+    private PrintStream progress;
     private final int maxSteps;
     private final ToolResultStore resultStore;
     private final ParentContext parentContext;
+    private TurnListener turnListener = TurnListener.NONE;
     private String instructions;
+
+    /** Observes tool activity within one prompt turn; implementations must not throw. */
+    public interface TurnListener {
+        void onToolStart(String name, String preview);
+        void onToolEnd(String name, boolean error);
+
+        TurnListener NONE = new TurnListener() {
+            @Override public void onToolStart(String name, String preview) { }
+            @Override public void onToolEnd(String name, boolean error) { }
+        };
+    }
 
     public Agent(ObjectMapper json, ResponsesClient client, List<Tool> tools,
                  ApprovalPolicy approvalPolicy, PrintStream progress, int maxSteps,
@@ -70,7 +82,13 @@ public final class Agent {
 
     public String prompt(String input, Consumer<String> textDelta)
             throws IOException, InterruptedException {
+        return prompt(input, textDelta, TurnListener.NONE);
+    }
+
+    public String prompt(String input, Consumer<String> textDelta, TurnListener listener)
+            throws IOException, InterruptedException {
         lastToolCalls.clear();
+        turnListener = listener == null ? TurnListener.NONE : listener;
         addUserMessage(input);
         for (int step = 0; step < maxSteps; step++) {
             ArrayNode requestInput = inputHistory.deepCopy();
@@ -98,6 +116,11 @@ public final class Agent {
 
     public ArrayNode snapshotInput() {
         return inputHistory.deepCopy();
+    }
+
+    /** UI seam for redirecting the [tool] progress line on interactive paths. */
+    void setProgress(PrintStream progress) {
+        this.progress = progress;
     }
 
     public List<ToolCallRecord> lastToolCalls() {
@@ -155,7 +178,9 @@ public final class Agent {
                 if (arguments == null || !arguments.isObject()) {
                     throw new IllegalArgumentException("tool arguments must be a JSON object");
                 }
-                progress.println("[tool] " + tool.preview(arguments));
+                String preview = tool.preview(arguments);
+                progress.println("[tool] " + preview);
+                turnListener.onToolStart(name, preview);
                 if (tool.requiresApproval(arguments) && !approvalPolicy.approve(tool, arguments)) {
                     result = "Error: user denied this tool call";
                 } else {
@@ -175,6 +200,7 @@ public final class Agent {
         }
 
         lastToolCalls.add(new ToolCallRecord(name, toolError ? "error" : "success"));
+        turnListener.onToolEnd(name, toolError);
         ObjectNode toolOutput = inputHistory.addObject();
         toolOutput.put("type", "function_call_output");
         toolOutput.put("call_id", callId);

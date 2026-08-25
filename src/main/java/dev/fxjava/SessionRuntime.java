@@ -1,6 +1,7 @@
 package dev.fxjava;
 
 import java.io.IOException;
+import java.io.PrintStream;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.function.Consumer;
@@ -41,8 +42,13 @@ final class SessionRuntime {
     }
 
     String prompt(String input, Consumer<String> textDelta) throws IOException, InterruptedException {
+        return prompt(input, textDelta, Agent.TurnListener.NONE);
+    }
+
+    String prompt(String input, Consumer<String> textDelta, Agent.TurnListener turnListener)
+            throws IOException, InterruptedException {
         try {
-            String answer = agent.prompt(input, textDelta);
+            String answer = agent.prompt(input, textDelta, turnListener);
             persist();
             return answer;
         } catch (IOException | InterruptedException primary) {
@@ -53,6 +59,10 @@ final class SessionRuntime {
             }
             throw primary;
         }
+    }
+
+    void setToolProgress(PrintStream progress) {
+        agent.setProgress(progress);
     }
 
     void clear(String instructions) throws IOException {

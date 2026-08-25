@@ -24,12 +24,19 @@ final class AskUserTool implements Tool {
     private final BufferedReader input;
     private final PrintStream output;
     private final boolean available;
+    private final QuestionFlow questions;
     private final ObjectNode parameters;
 
     AskUserTool(BufferedReader input, PrintStream output, boolean available) {
+        this(input, output, available, null);
+    }
+
+    /** {@code questions} hands presentation and answering to the raw shell when attached. */
+    AskUserTool(BufferedReader input, PrintStream output, boolean available, QuestionFlow questions) {
         this.input = input;
         this.output = output;
         this.available = available;
+        this.questions = questions;
         ObjectNode option = JSON.createObjectNode().put("type", "object");
         option.putObject("properties").putObject("label").put("type", "string");
         option.withObject("properties").putObject("description").put("type", "string");
@@ -56,24 +63,33 @@ final class AskUserTool implements Tool {
     @Override
     public String execute(JsonNode arguments) throws IOException {
         if (!available) return NOT_AVAILABLE;
-        List<Question> questions = parse(arguments);
+        List<Question> parsed = parse(arguments);
         ArrayNode answers = JSON.createArrayNode();
-        for (Question question : questions) {
-            output.println(question.text());
-            for (int index = 0; index < question.options().size(); index++) {
-                Option option = question.options().get(index);
-                output.println("  " + (index + 1) + ". " + option.label()
-                        + (option.description().isBlank() ? "" : " — " + option.description()));
-            }
-            output.print("Choose 1-" + question.options().size() + ": ");
-            output.flush();
-            String raw = input.readLine();
-            if (raw == null) return CANCELLED;
-            String answer = select(raw.trim(), question.options());
+        for (Question question : parsed) {
+            String answer = askOne(question);
             if (answer == null) return CANCELLED;
             answers.addObject().put("question", question.text()).put("answer", answer);
         }
         return JSON.writeValueAsString(answers);
+    }
+
+    /**
+     * The attached flow owns raw-shell rendering and answering; the legacy
+     * BufferedReader path prints the plain protocol unchanged.
+     */
+    private String askOne(Question question) throws IOException {
+        if (questions != null) return questions.ask(question);
+        output.println(question.text());
+        for (int index = 0; index < question.options().size(); index++) {
+            Option option = question.options().get(index);
+            output.println("  " + (index + 1) + ". " + option.label()
+                    + (option.description().isBlank() ? "" : " — " + option.description()));
+        }
+        output.print("Choose 1-" + question.options().size() + ": ");
+        output.flush();
+        String raw = input.readLine();
+        if (raw == null) return null;
+        return select(raw.trim(), question.options());
     }
 
     private static List<Question> parse(JsonNode arguments) {
@@ -125,11 +141,11 @@ final class AskUserTool implements Tool {
         return value.toString();
     }
 
-    private static final class Question {
+    static final class Question {
         private final String text;
         private final List<Option> options;
 
-        private Question(String text, List<Option> options) {
+        Question(String text, List<Option> options) {
             this.text = text;
             this.options = options;
         }
@@ -156,11 +172,11 @@ final class AskUserTool implements Tool {
         public String toString() { return "Question[text=" + text + ", options=" + options + "]"; }
     }
 
-    private static final class Option {
+    static final class Option {
         private final String label;
         private final String description;
 
-        private Option(String label, String description) {
+        Option(String label, String description) {
             this.label = label;
             this.description = description;
         }

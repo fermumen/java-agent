@@ -29,6 +29,11 @@ data-processing libraries to JShell without coupling them to the agent runtime.
 - fx-compatible persistent memory plus session-scoped large tool-result previews, bounded paging, and literal search
 - fx-compatible masking of provider tokens, credential URLs, and sensitive assignments before model replay or sidecar persistence
 - Interactive FX-shaped multiple-choice clarification with a noninteractive sentinel
+- FX-shaped interactive terminal UI: raw-mode composer with history, bracketed
+  paste, and Ctrl+C semantics; markdown streaming with spinner and live tool
+  groups; slash popup menu and `/help` catalog; inline approval boxes with
+  session `always` grants; type-ahead replay; and inline ask_user question
+  panels answered by digits or option prefixes
 - Direct bounded public `web_fetch` with redirect revalidation, HTML text conversion, caching, and credential redaction
 - MCP stdio, Streamable HTTP, and deprecated HTTP+SSE tools, live catalog refresh,
   metadata search/selection, resources, negotiated subscribe-on-read with
@@ -158,7 +163,10 @@ crash-recoverable terminal sessions and full PTY/ANSI screen behavior, richer
 permission rules, MCP OAuth/fx multiplexed subscription streams, remote skill sources
 and full-screen skill management, richer subagent identity isolation, media
 tools, and the full-screen UI remain fx parity work. The implemented terminal boundary is documented in
-[`docs/terminal-parity.md`](docs/terminal-parity.md). The session/streaming
+[`docs/terminal-parity.md`](docs/terminal-parity.md). The interactive
+composer, transcript, slash menu, approvals, and ask_user surfaces are covered by
+[`docs/ui-parity.md`](docs/ui-parity.md), which also lists their explicit limits; the full-screen
+transcript manager stays future work. The session/streaming
 subset and its explicit limits are in
 [`docs/session-streaming-parity.md`](docs/session-streaming-parity.md), and skills
 in

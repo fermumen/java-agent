@@ -184,10 +184,11 @@ final class TerminalTool implements Tool {
 
         ObjectNode outcome = awaitCondition(session, composite(arguments, "return_when"),
                 longValue(arguments, "wait_ceiling_ms", 0));
-        refreshMonitors(session);
+        refreshMonitors(session, false);
         Success response = success("start");
         response.body.set("session", facts(session));
         response.body.set("outcome", outcome);
+        session.birthSnapshotPending = false;
         return stringify(response.root);
     }
 
@@ -491,7 +492,12 @@ final class TerminalTool implements Tool {
     }
 
     private static void refreshMonitors(TerminalSession session) {
+        refreshMonitors(session, true);
+    }
+
+    private static void refreshMonitors(TerminalSession session, boolean observeExit) {
         boolean exited = !session.process.isAlive();
+        if (exited && observeExit && !session.birthSnapshotPending) session.exitObserved = true;
         Integer exitCode = exited ? session.process.exitValue() : null;
         session.monitors.refresh(new TerminalMonitors.Observation(session.outputText(), exited,
                 exitCode, session.lastSignal, session.lastOutputNanos));
@@ -776,6 +782,8 @@ final class TerminalTool implements Tool {
         volatile long lastOutputNanos = System.nanoTime();
         volatile boolean truncated;
         volatile boolean closed;
+        volatile boolean exitObserved;
+        volatile boolean birthSnapshotPending = true;
         volatile String lastSignal;
         volatile int rows = 24;
         volatile int columns = 80;
@@ -856,7 +864,9 @@ final class TerminalTool implements Tool {
 
         String lifecycle() {
             if (closed) return "closed";
-            return process.isAlive() ? "running" : "exited";
+            // Sticky: a fast command can exit before the first snapshot, so the
+            // exited state is only entered once an action boundary observes it.
+            return exitObserved ? "exited" : "running";
         }
     }
 }

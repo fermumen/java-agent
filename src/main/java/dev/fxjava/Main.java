@@ -18,7 +18,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 public final class Main {
-    private static final String VERSION = "0.2.0";
+    static final String VERSION = "0.2.0";
 
     private Main() {
     }
@@ -80,7 +80,7 @@ public final class Main {
         ObjectMapper json = new ObjectMapper();
         BufferedReader input = new BufferedReader(new InputStreamReader(standardInput));
         Console console = System.console();
-        ApprovalPolicy approval = approvalPolicy(config, input, error, console);
+        ApprovalRouter approval = new ApprovalRouter(approvalPolicy(config, input, error, console));
         String configuredRoot = firstNonBlank(options.sessionRoot, environment.get("JAVA_AGENT_HOME"));
         Path sessionRoot = configuredRoot == null
                 ? Path.of(System.getProperty("user.home"), ".java-agent") : Path.of(configuredRoot);
@@ -95,7 +95,7 @@ public final class Main {
         if (options.webSearch || Boolean.parseBoolean(environment.getOrDefault("JAVA_AGENT_WEB_SEARCH", "false"))) {
             agentTools.add(new HostedWebSearchTool());
         }
-        agentTools.add(new AskUserTool(input, error, console != null));
+        agentTools.add(new AskUserTool(input, error, console != null, approval.questions()));
         agentTools.add(new ReadToolResultTool(resultStore));
         agentTools.addAll(mcp.tools());
         AtomicReference<List<Tool>> childTools = new AtomicReference<>();
@@ -120,6 +120,19 @@ public final class Main {
             return 0;
         }
 
+        TerminalCapabilities capabilities = TerminalCapabilities.detect(environment);
+        if (capabilities.interactive()) {
+            RawTerminal terminal = RawTerminal.open();
+            if (terminal != null) {
+                try (RawTerminal owned = terminal) {
+                    Ansi ansi = Ansi.fromEnvironment(environment, true);
+                    InteractiveShell shell = new InteractiveShell(session, config, systemPrompt, mcp,
+                            sessionRoot, standardInput, out, error, ansi, approval,
+                            modelSource(options, environment), System::nanoTime);
+                    return shell.run(owned, capabilities);
+                }
+            }
+        }
         out.println("java-agent " + VERSION + " | Responses API | " + config.model()
                 + " | " + config.workspace());
         if (session.id() != null) out.println("Session: " + session.id());
@@ -360,6 +373,17 @@ public final class Main {
         };
     }
 
+    private static String modelSource(Options options, Map<String, String> environment) {
+        if (options.model != null) return "--model flag";
+        if (notBlank(environment.get("OPENAI_MODEL"))) return "env OPENAI_MODEL";
+        if (notBlank(environment.get("JAVA_AGENT_MODEL"))) return "env JAVA_AGENT_MODEL";
+        return "default";
+    }
+
+    private static boolean notBlank(String value) {
+        return value != null && !value.isBlank();
+    }
+
     private static String firstNonBlank(String... values) {
         for (String value : values) {
             if (value != null && !value.isBlank()) return value;
@@ -400,6 +424,7 @@ public final class Main {
                 + "  OPENAI_API_KEY (JAVA_AGENT_API_KEY is also accepted)\n"
                 + "\n"
                 + "The harness uses POST /v1/responses with store=false.\n"
+                + "Interactive keys: Tab completes /commands, Ctrl+C cancels (twice exits), /help lists more.\n"
                 + "\n"
                 + "Examples:\n"
                 + "  java -jar target/java-agent.jar\n"
