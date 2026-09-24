@@ -1,20 +1,26 @@
 package dev.fxjava;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
 
 /** Keeps durable session mechanics separate from the response/tool loop. */
 final class SessionRuntime {
+    private static final ObjectMapper JSON = new ObjectMapper();
+
     private Agent agent;
     private final SessionStore store;
     private SessionStore.Snapshot snapshot;
     private volatile SessionRules rules;
     private SessionUsage usage = SessionUsage.zeroed();
+    private final List<ImageAttachment> pendingImages = new ArrayList<>();
 
     private SessionRuntime(Agent agent, SessionStore store, SessionStore.Snapshot snapshot) {
         this.agent = agent;
@@ -62,8 +68,13 @@ final class SessionRuntime {
         java.util.concurrent.atomic.AtomicLong inputTokens = new java.util.concurrent.atomic.AtomicLong();
         java.util.concurrent.atomic.AtomicLong outputTokens = new java.util.concurrent.atomic.AtomicLong();
         Agent.TurnListener usageListener = wrapWithUsage(turnListener, inputTokens, outputTokens);
+        // Submitting consumes staged attachments exactly once, like fx clearing
+        // the draft's placeholders: a failed turn does not re-attach them.
+        ObjectNode multimodal = buildMultimodalMessage(drainPendingImages(), input);
         try {
-            String answer = agent.prompt(input, textDelta, usageListener);
+            String answer = multimodal == null
+                    ? agent.prompt(input, textDelta, usageListener)
+                    : agent.promptWithUserMessage(multimodal, textDelta, usageListener);
             persist(inputTokens.getAndSet(0), outputTokens.getAndSet(0));
             return answer;
         } catch (IOException | InterruptedException primary) {
@@ -74,6 +85,49 @@ final class SessionRuntime {
             }
             throw primary;
         }
+    }
+
+    /**
+     * One user message carrying input_text plus one input_image part per
+     * staged attachment; null when no images are staged so plain turns keep
+     * their exact historical string-content shape.
+     */
+    private static ObjectNode buildMultimodalMessage(List<ImageAttachment> images, String input) {
+        if (images.isEmpty()) return null;
+        ObjectNode message = JSON.createObjectNode();
+        message.put("role", "user");
+        ArrayNode content = message.putArray("content");
+        content.addObject().put("type", "input_text").put("text", input == null ? "" : input);
+        for (ImageAttachment image : images) content.add(image.inputPart(JSON, "auto"));
+        return message;
+    }
+
+    /** Snapshot of images staged via /image that ride with the next submitted message. */
+    synchronized List<ImageAttachment> pendingImages() {
+        return List.copyOf(pendingImages);
+    }
+
+    /** Stages one attachment for the next submitted message, bounded per prompt. */
+    synchronized void stagePendingImage(ImageAttachment image) throws IOException {
+        if (pendingImages.size() >= ImageAttachment.MAX_IMAGES_PER_PROMPT) {
+            throw new IOException("at most " + ImageAttachment.MAX_IMAGES_PER_PROMPT
+                    + " images can be attached per message");
+        }
+        pendingImages.add(image);
+    }
+
+    /** Discards every staged attachment; true when anything was pending. */
+    synchronized boolean clearPendingImages() {
+        boolean hadPending = !pendingImages.isEmpty();
+        pendingImages.clear();
+        return hadPending;
+    }
+
+    private synchronized List<ImageAttachment> drainPendingImages() {
+        if (pendingImages.isEmpty()) return List.of();
+        List<ImageAttachment> drained = new ArrayList<>(pendingImages);
+        pendingImages.clear();
+        return drained;
     }
 
     /**
@@ -106,6 +160,7 @@ final class SessionRuntime {
 
     void clear(String instructions) throws IOException {
         agent.clearConversation(instructions);
+        synchronized (this) { pendingImages.clear(); }
         persist(0, 0);
     }
 
@@ -221,6 +276,7 @@ final class SessionRuntime {
         SessionStore.Snapshot created = store.create(workspace, model, instructions);
         SessionRules createdRules = created.rules();
         agent.clearConversation(instructions);
+        pendingImages.clear();
         snapshot = created;
         rules = createdRules;
         usage = created.usage();
@@ -234,6 +290,7 @@ final class SessionRuntime {
         SessionRules loadedRules = loaded.rules();
         SessionUsage loadedUsage = loaded.usage();
         agent.restoreConversation(loaded.input(), loaded.instructions());
+        pendingImages.clear();
         snapshot = loaded;
         rules = loadedRules;
         usage = loadedUsage;
@@ -248,6 +305,7 @@ final class SessionRuntime {
         SessionRules recoveredRules = recovered.rules();
         SessionUsage recoveredUsage = recovered.usage();
         agent.restoreConversation(recovered.input(), recovered.instructions());
+        pendingImages.clear();
         snapshot = recovered;
         rules = recoveredRules;
         usage = recoveredUsage;

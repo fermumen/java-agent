@@ -236,15 +236,54 @@ final class ConversationCompactor {
     private static String messageText(JsonNode message) {
         StringBuilder text = new StringBuilder();
         for (JsonNode content : message.path("content")) {
+            if (content.isObject() && content.path("type").asText().equals("input_image")) {
+                appendPart(text, imagePlaceholder(content));
+                continue;
+            }
             String value = content.path("type").asText().equals("refusal")
                     ? content.path("refusal").asText()
                     : content.path("text").asText();
-            if (!value.isEmpty()) {
-                if (text.length() > 0) text.append(' ');
-                text.append(value);
-            }
+            appendPart(text, value);
         }
         return text.toString();
+    }
+
+    private static void appendPart(StringBuilder text, String value) {
+        if (!value.isEmpty()) {
+            if (text.length() > 0) text.append(' ');
+            text.append(value);
+        }
+    }
+
+    /**
+     * Summarizer-facing placeholder for one image part. Base64 data never
+     * enters the transcript: the label is the cheaply available media subtype
+     * from a data URL or sidecar reference filename, else generic.
+     */
+    private static String imagePlaceholder(JsonNode part) {
+        String url = part.path("image_url").asText();
+        if (url.startsWith("data:image/")) {
+            int end = url.indexOf(';');
+            if (end > "data:image/".length()) return "<image "
+                    + url.substring("data:image/".length(), end) + ">";
+        } else if (url.startsWith("java-agent-image:")) {
+            String filename = url.substring("java-agent-image:".length());
+            int dot = filename.lastIndexOf('.');
+            if (dot >= 0) {
+                String extension = filename.substring(dot + 1).toLowerCase(java.util.Locale.ROOT);
+                switch (extension) {
+                    case "png":
+                    case "jpg":
+                    case "gif":
+                        return "<image " + extension + ">";
+                    case "webp":
+                        return "<image webp>";
+                    default:
+                        break;
+                }
+            }
+        }
+        return "<image>";
     }
 
     private static String contentText(JsonNode content) {

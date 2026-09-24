@@ -18,7 +18,8 @@ final class SlashCommands {
         SESSION("Session"),
         MODEL("Model"),
         PERMISSIONS("Permissions"),
-        MCP("MCP");
+        MCP("MCP"),
+        MEDIA("Media");
 
         private final String label;
 
@@ -83,7 +84,9 @@ final class SlashCommands {
             new Spec("/stats", List.of(), "", "token totals for this and recent saved sessions",
                     Category.GENERAL),
             new Spec("/compact", List.of(), "", "summarize older history, keeping recent exchanges verbatim",
-                    Category.SESSION));
+                    Category.SESSION),
+            new Spec("/image", List.of(), "<path|clear>", "attach a local image to your next message",
+                    Category.MEDIA));
 
     static List<Spec> registry() {
         return REGISTRY;

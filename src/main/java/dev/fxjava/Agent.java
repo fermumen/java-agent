@@ -98,11 +98,29 @@ public final class Agent {
 
     public String prompt(String input, Consumer<String> textDelta, TurnListener listener)
             throws IOException, InterruptedException {
+        return runTurn(null, input, textDelta, listener);
+    }
+
+    /**
+     * Internal seam for pre-built user messages, e.g. multimodal turns whose
+     * content is an input_text + input_image array. The message is appended to
+     * durable history exactly as given (deep-copied); tool-call pairing,
+     * replay, and persistence behave identically to {@link #prompt}.
+     */
+    String promptWithUserMessage(ObjectNode userMessage, Consumer<String> textDelta,
+                                 TurnListener listener) throws IOException, InterruptedException {
+        return runTurn(Objects.requireNonNull(userMessage, "userMessage"), null, textDelta, listener);
+    }
+
+    private String runTurn(ObjectNode prebuiltUserMessage, String textInput,
+                           Consumer<String> textDelta, TurnListener listener)
+            throws IOException, InterruptedException {
         lastToolCalls.clear();
         turnListener = listener == null ? TurnListener.NONE : listener;
         turnInputTokens = 0;
         turnOutputTokens = 0;
-        addUserMessage(input);
+        if (prebuiltUserMessage != null) addUserMessage(prebuiltUserMessage);
+        else addUserMessage(textInput);
         try {
             for (int step = 0; step < maxSteps; step++) {
                 ArrayNode requestInput = inputHistory.deepCopy();
@@ -309,6 +327,11 @@ public final class Agent {
         ObjectNode message = inputHistory.addObject();
         message.put("role", "user");
         message.put("content", content);
+    }
+
+    /** Appends a caller-built user message item (deep copy) to durable history. */
+    private void addUserMessage(ObjectNode message) {
+        inputHistory.add(message.deepCopy());
     }
 
     private JsonNode persistable(JsonNode item) {

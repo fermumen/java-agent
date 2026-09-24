@@ -385,6 +385,10 @@ final class InteractiveShell implements QuestionFlow {
             case "/compact":
                 compact(argumentAfter(line, "/compact"));
                 break;
+            case "/image":
+                ImageCommands.handle(session, argumentAfter(line, "/image"),
+                        config.workspace(), ansi, out);
+                break;
             case "/mcp":
                 mcpHealth(argumentAfter(line, "/mcp"));
                 break;
@@ -441,6 +445,11 @@ final class InteractiveShell implements QuestionFlow {
     private void generate(String prompt) throws IOException, InterruptedException {
         cancelled.set(false);
         refreshColumns(false);
+        List<ImageAttachment> attached = session.pendingImages();
+        if (!attached.isEmpty()) {
+            out.println(ansi.dim() + ImageCommands.attachmentSummary(attached) + ansi.reset());
+            out.flush();
+        }
         Spinner spinner = new Spinner(out, ansi, clock, SPINNER_INTERVAL_NANOS);
         TranscriptPresenter presenter = new TranscriptPresenter(out, ansi, columns, spinner);
         AtomicBoolean streamed = new AtomicBoolean();
@@ -798,10 +807,14 @@ final class InteractiveShell implements QuestionFlow {
         String hint = StatusLines.hint(config.model(), modeLabel(), session.id(),
                 Math.max(1, columns), ansi);
         List<String> menuRows = menu.active() ? composeMenuRows() : List.<String>of();
+        List<String> pendingRows = composePendingRows();
         StringBuilder frame = new StringBuilder();
         frame.append(ansi.cursorUp(cursorRowFromTop));
         if (!hint.isEmpty()) frame.append('\r').append(ansi.eraseLine()).append(hint).append('\n');
         for (String row : menuRows) {
+            frame.append('\r').append(ansi.eraseLine()).append(row).append('\n');
+        }
+        for (String row : pendingRows) {
             frame.append('\r').append(ansi.eraseLine()).append(row).append('\n');
         }
         String text = composer.text();
@@ -811,7 +824,7 @@ final class InteractiveShell implements QuestionFlow {
             frame.append(text, rows.get(index).startOffset, trailingBoundary(text, rows.get(index)));
             if (index < rows.size() - 1) frame.append('\n');
         }
-        int totalRows = rows.size() + menuRows.size() + (hint.isEmpty() ? 0 : 1);
+        int totalRows = rows.size() + menuRows.size() + pendingRows.size() + (hint.isEmpty() ? 0 : 1);
         int upToCursor = rows.size() - 1 - cursor.row();
         if (renderedRows > totalRows) {
             // The frame shrank (menu closed, text unwrapped): erase the stale tail.
@@ -830,6 +843,17 @@ final class InteractiveShell implements QuestionFlow {
         out.flush();
         renderedRows = totalRows;
         cursorRowFromTop = totalRows - rows.size() + cursor.row();
+    }
+
+    /** One dim pending line per staged attachment, rendered between menu and composer. */
+    private List<String> composePendingRows() {
+        List<ImageAttachment> pending = session.pendingImages();
+        if (pending.isEmpty()) return List.of();
+        List<String> rows = new ArrayList<>();
+        for (ImageAttachment image : pending) {
+            rows.add(ansi.dim() + ImageCommands.pendingLine(image) + ansi.reset());
+        }
+        return rows;
     }
 
     /** Two-column menu rows: padded command plus dim description, selected row bolded. */

@@ -148,7 +148,7 @@ public final class Main {
         out.println("java-agent " + VERSION + " | Responses API | " + config.model()
                 + " | " + config.workspace());
         if (session.id() != null) out.println("Session: " + session.id());
-        out.println("Enter a request. Commands: /new, /clear, /sessions, /resume <id|last>, /recover <id>, /rename <title>, /permissions, /stats, /compact, /mcp list, /exit");
+        out.println("Enter a request. Commands: /new, /clear, /sessions, /resume <id|last>, /recover <id>, /rename <title>, /permissions, /stats, /compact, /image <path>, /mcp list, /exit");
         while (true) {
             out.print("> ");
             out.flush();
@@ -199,6 +199,9 @@ public final class Main {
             } else if (isCommand(line, "/compact")) {
                 CompactCommands.handle(session, line.substring("/compact".length()),
                         Ansi.of(false), out, error);
+            } else if (isCommand(line, "/image")) {
+                ImageCommands.handle(session, line.substring("/image".length()), workspace,
+                        Ansi.of(false), out);
             } else if (line.equals("/mcp") || line.equals("/mcp list")) {
                 out.print(mcp.healthText());
             } else if (!line.isBlank()) {
@@ -346,6 +349,11 @@ public final class Main {
             throws IOException, InterruptedException {
         boolean[] streamed = { false };
         long[] turnUsage = new long[2];
+        List<ImageAttachment> attached = session.pendingImages();
+        if (!structured && !attached.isEmpty()) {
+            out.println(ImageCommands.attachmentSummary(attached));
+            out.flush();
+        }
         String answer = session.prompt(prompt, delta -> {
             if (!structured) {
                 streamed[0] = true;
