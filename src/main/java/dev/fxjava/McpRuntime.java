@@ -746,9 +746,13 @@ final class McpRuntime implements AutoCloseable {
         @Override public ObjectNode parameters() { return remote.inputSchema().deepCopy(); }
         @Override public boolean requiresApproval() { return !remote.readOnly(); }
         @Override public String preview(JsonNode arguments) {
-            return "MCP " + server.config.name() + "/" + remote.name();
+            return "MCP " + server.config.name() + "/" + remote.name() + " arguments="
+                    + ToolPreview.redactedJson(server.json, "mcp", arguments);
         }
         @Override public String execute(JsonNode arguments) throws Exception {
+            return executeResult(arguments, null).output();
+        }
+        @Override public ToolResult executeResult(JsonNode arguments, String invocationId) throws Exception {
             ObjectNode params = server.json.createObjectNode();
             params.put("name", remote.name());
             params.set("arguments", arguments.deepCopy());
@@ -756,7 +760,9 @@ final class McpRuntime implements AutoCloseable {
             McpValidation.toolResult(result);
             byte[] encoded = server.json.writeValueAsBytes(result);
             if (encoded.length > MAX_RESULT_BYTES) throw new IOException("MCP tool result exceeds 200 KiB");
-            return new String(encoded, StandardCharsets.UTF_8);
+            String output = new String(encoded, StandardCharsets.UTF_8);
+            return result.path("isError").asBoolean(false)
+                    ? ToolResult.error(output) : ToolResult.success(output);
         }
     }
 

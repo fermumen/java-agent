@@ -6,7 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.awt.Desktop;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
+import java.io.InterruptedIOException;
 import java.nio.file.DirectoryNotEmptyException;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
@@ -30,9 +30,12 @@ import java.util.stream.Stream;
 /** The compact remainder of fx's filesystem tool surface. */
 final class FxFileTools {
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final int MAX_READ_BYTES = 50 * 1024;
+    private static final long MAX_SEARCH_FILE_BYTES = 8L * 1024 * 1024;
+    private static final long MAX_SEARCH_TOTAL_BYTES = 64L * 1024 * 1024;
+    private static final int MAX_SEARCH_LINE_CHARS = 16 * 1024;
     private static final int MAX_RESULTS = 100;
-    private static final int MAX_CANDIDATES = 10_000;
+    private static final int MAX_CANDIDATES = 2_000;
+    private static final int MAX_SEARCH_VISITED_ENTRIES = 20_000;
     private static final Set<String> STOP_WORDS = Set.of(
             "a", "an", "the", "is", "are", "was", "were", "in", "on", "at", "to", "for",
             "of", "and", "or", "not", "it", "this", "that", "with", "from", "by", "as",
@@ -203,46 +206,121 @@ final class FxFileTools {
         if (keywords.isEmpty()) return "[search] empty query\n";
         Path root = workspace.resolveExisting(optionalText(args, "path", "."));
         List<SearchHit> hits = new ArrayList<>();
-        try (Stream<Path> stream = Files.isRegularFile(root) ? Stream.of(root) : Files.walk(root)) {
-            for (Path file : stream.filter(Files::isRegularFile)
-                    .filter(path -> !FxIgnoredPaths.contains(root, path)).limit(2_000)
-                    .collect(Collectors.toList())) {
-                if (Files.size(file) > MAX_READ_BYTES * 2L) continue;
-                String content;
+        WorkspaceSearchFiles.Selection selection = WorkspaceSearchFiles.under(root, MAX_CANDIDATES,
+                MAX_SEARCH_VISITED_ENTRIES, path -> FxIgnoredPaths.contains(root, path));
+        long totalBytesRead = 0;
+        int unreadableFiles = selection.unresolvable();
+        int binaryFiles = 0;
+        int partialFiles = 0;
+        int longLineFiles = 0;
+        boolean byteBudgetReached = false;
+        for (Path file : selection.files()) {
+            if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException("Search interrupted");
+            long remainingBudget = MAX_SEARCH_TOTAL_BYTES - totalBytesRead;
+            if (remainingBudget <= 0) {
+                byteBudgetReached = true;
+                break;
+            }
+            long fileBudget = Math.min(MAX_SEARCH_FILE_BYTES, remainingBudget);
+            String lowerName = file.getFileName().toString().toLowerCase(Locale.ROOT);
+            int score = 0;
+            for (String keyword : keywords) {
+                if (lowerName.contains(keyword)) score += 3;
+            }
+            long lineNumber = 0;
+            long sampleLine = 1;
+            String sample = "";
+            boolean sampleClipped = false;
+            boolean binary = false;
+            boolean partial = false;
+            boolean longLine = false;
+            try {
+                BoundedTextReader reader = BoundedTextReader.open(file, fileBudget, MAX_SEARCH_LINE_CHARS);
                 try {
-                    content = Files.readString(file, StandardCharsets.UTF_8);
-                } catch (IOException | RuntimeException unreadable) {
-                    continue;
-                }
-                String lowerName = file.getFileName().toString().toLowerCase(Locale.ROOT);
-                String[] lines = content.split("\\R", -1);
-                int score = 0;
-                int sampleLine = 1;
-                String sample = "";
-                for (String keyword : keywords) {
-                    if (lowerName.contains(keyword)) score += 3;
-                    for (int index = 0; index < lines.length; index++) {
-                        if (lines[index].toLowerCase(Locale.ROOT).contains(keyword)) {
-                            score++;
-                            if (sample.isEmpty()) {
-                                sampleLine = index + 1;
-                                sample = lines[index];
+                    try (reader) {
+                        for (BoundedTextReader.Line line; (line = reader.readLine()) != null; ) {
+                            lineNumber++;
+                            if (line.containsNul()) {
+                                binary = true;
+                                break;
+                            }
+                            if (line.truncated()) longLine = true;
+                            String lowerLine = line.text().toLowerCase(Locale.ROOT);
+                            boolean matchedLine = false;
+                            for (String keyword : keywords) {
+                                if (lowerLine.contains(keyword)) {
+                                    score++;
+                                    matchedLine = true;
+                                }
+                            }
+                            if (matchedLine && sample.isEmpty()) {
+                                sampleLine = lineNumber;
+                                sample = line.text();
+                                sampleClipped = line.truncated() || line.partial();
+                            }
+                            if (line.partial()) {
+                                partial = true;
+                                break;
                             }
                         }
+                        if (reader.byteLimitReached()) partial = true;
                     }
+                } finally {
+                    totalBytesRead += reader.bytesRead();
                 }
-                if (score > 0) hits.add(new SearchHit(workspace.display(file), score, sampleLine, sample));
+            } catch (InterruptedIOException interrupted) {
+                throw interrupted;
+            } catch (IOException | RuntimeException unreadable) {
+                unreadableFiles++;
+                continue;
+            }
+            if (binary) {
+                binaryFiles++;
+                continue;
+            }
+            if (partial) partialFiles++;
+            if (longLine) longLineFiles++;
+            if (score > 0) {
+                hits.add(new SearchHit(workspace.display(file), score, sampleLine,
+                        clip(sample, 2_000, sampleClipped)));
+            }
+            if (totalBytesRead >= MAX_SEARCH_TOTAL_BYTES) {
+                byteBudgetReached = true;
+                break;
             }
         }
         hits.sort(Comparator.comparingInt(SearchHit::score).reversed().thenComparing(SearchHit::path));
-        if (hits.isEmpty()) return "[search] no results for: " + query + "\n";
+        boolean incomplete = selection.outsideRoot() > 0 || unreadableFiles > 0 || binaryFiles > 0
+                || partialFiles > 0 || longLineFiles > 0 || selection.candidateLimitReached()
+                || selection.traversalLimitReached() || byteBudgetReached;
+        String diagnostics = searchDiagnostics(selection, unreadableFiles, binaryFiles,
+                partialFiles, longLineFiles, byteBudgetReached);
+        if (hits.isEmpty()) return "[search] no results for: " + query + diagnostics + "\n";
         int shown = Math.min(hits.size(), MAX_RESULTS);
         StringBuilder output = new StringBuilder("[search] ").append(shown).append(" results for: ")
-                .append(query).append('\n');
+                .append(query).append(diagnostics).append('\n');
         hits.subList(0, shown).forEach(hit -> output.append(hit.path()).append(':')
-                .append(hit.line()).append(": ").append(clip(hit.sample(), 2_000)).append('\n'));
+                .append(hit.line()).append(": ").append(hit.sample()).append('\n'));
         if (shown < hits.size()) output.append("... and ").append(hits.size() - shown).append(" more\n");
+        else if (incomplete) output.append("... results may be incomplete; narrow the search path or query to continue.\n");
         return output.toString();
+    }
+
+    private static String searchDiagnostics(WorkspaceSearchFiles.Selection selection, int unreadable,
+                                            int binary, int partial, int longLines, boolean byteBudgetReached) {
+        List<String> details = new ArrayList<>();
+        if (selection.outsideRoot() > 0) details.add(selection.outsideRoot()
+                + " candidate(s) outside the selected search root skipped");
+        if (unreadable > 0) details.add(unreadable + " unreadable or unresolved file(s) skipped");
+        if (binary > 0) details.add(binary + " binary file(s) skipped");
+        if (partial > 0) details.add(partial + " file(s) scanned only through a byte limit");
+        if (longLines > 0) details.add(longLines + " file(s) contained lines longer than "
+                + MAX_SEARCH_LINE_CHARS + " characters; omitted line suffixes may contain query terms");
+        if (selection.candidateLimitReached()) details.add("candidate scan stopped at " + MAX_CANDIDATES + " files");
+        if (selection.traversalLimitReached()) details.add("directory traversal stopped at "
+                + MAX_SEARCH_VISITED_ENTRIES + " entries");
+        if (byteBudgetReached) details.add("total text scan stopped at " + MAX_SEARCH_TOTAL_BYTES + " bytes");
+        return details.isEmpty() ? "" : " [search incomplete: " + String.join("; ", details) + "]";
     }
 
     private static String openFile(WorkspaceTools.Workspace workspace, JsonNode args) throws IOException {
@@ -317,17 +395,20 @@ final class FxFileTools {
                 || (Files.exists(second) && Files.isSameFile(first, second));
     }
 
-    private static String clip(String value, int maximum) {
-        return value.length() <= maximum ? value : value.substring(0, maximum);
+    private static String clip(String value, int maximum, boolean sourceTruncated) {
+        if (value.length() <= maximum && !sourceTruncated) return value;
+        int end = Math.min(value.length(), maximum);
+        if (end > 0 && end < value.length() && Character.isHighSurrogate(value.charAt(end - 1))) end--;
+        return value.substring(0, end) + "... [sample clipped]";
     }
 
     private static final class SearchHit {
         private final String path;
         private final int score;
-        private final int line;
+        private final long line;
         private final String sample;
 
-        SearchHit(String path, int score, int line, String sample) {
+        SearchHit(String path, int score, long line, String sample) {
             this.path = path;
             this.score = score;
             this.line = line;
@@ -336,7 +417,7 @@ final class FxFileTools {
 
         public String path() { return path; }
         public int score() { return score; }
-        public int line() { return line; }
+        public long line() { return line; }
         public String sample() { return sample; }
 
         @Override
@@ -352,7 +433,7 @@ final class FxFileTools {
         public int hashCode() {
             int result = Objects.hashCode(path);
             result = 31 * result + Integer.hashCode(score);
-            result = 31 * result + Integer.hashCode(line);
+            result = 31 * result + Long.hashCode(line);
             return 31 * result + Objects.hashCode(sample);
         }
 

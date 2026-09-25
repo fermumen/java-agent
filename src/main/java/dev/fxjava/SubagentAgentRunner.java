@@ -22,6 +22,7 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
     private final ApprovalPolicy parentAuthority;
     private final PrintStream progress;
     private final Agent.ParentContext parentContext;
+    private final ContextBudget contextBudget;
     private SubagentManager.ChildConfiguration configuration;
     private Agent agent;
 
@@ -38,6 +39,15 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
                         ApprovalPolicy parentApproval, PrintStream progress,
                         SubagentManager.ChildConfiguration configuration,
                         Agent.ParentContext parentContext) throws Exception {
+        this(json, apiKey, baseUrl, defaultModel, workspace, maxSteps, sessionRoot, tools,
+                parentApproval, progress, configuration, parentContext, new ContextBudget());
+    }
+
+    SubagentAgentRunner(ObjectMapper json, String apiKey, String baseUrl, String defaultModel, Path workspace, int maxSteps,
+                        Path sessionRoot, AtomicReference<List<Tool>> tools,
+                        ApprovalPolicy parentApproval, PrintStream progress,
+                        SubagentManager.ChildConfiguration configuration,
+                        Agent.ParentContext parentContext, ContextBudget contextBudget) throws Exception {
         this.json = json;
         this.apiKey = apiKey;
         this.baseUrl = baseUrl;
@@ -49,6 +59,7 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
         this.parentAuthority = parentApproval;
         this.progress = progress;
         this.parentContext = parentContext;
+        this.contextBudget = contextBudget;
         this.configuration = configuration;
         this.agent = build(configuration);
     }
@@ -86,7 +97,8 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
 
     private Agent build(SubagentManager.ChildConfiguration child) throws Exception {
         String model = child.model() == null ? defaultModel : child.model();
-        AgentConfig config = new AgentConfig(apiKey, baseUrl, model, workspace, maxSteps, child.permissionMode());
+        AgentConfig config = new AgentConfig(apiKey, baseUrl, model, workspace, maxSteps, child.permissionMode(),
+                contextBudget.requestTokenBudget(), contextBudget.triggerPercent(), contextBudget.imageTokenReserve());
         ToolResultStore results = new ToolResultStore(sessionRoot);
         results.setSession(child.id());
         List<Tool> childTools = new java.util.ArrayList<>();
@@ -98,14 +110,15 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
         Agent built = new Agent(json, new OpenAiResponsesClient(json, config), childTools,
                 approval(child.permissionMode(), parentAuthority, progress), progress, maxSteps,
                 instructionsFor(child, null), results,
-                parentContext);
+                parentContext, contextBudget);
         built.setToolResultSession(child.id());
         return built;
     }
 
     private String instructionsFor(SubagentManager.ChildConfiguration child, String prior) throws Exception {
         AgentConfig config = new AgentConfig(apiKey, baseUrl,
-                child.model() == null ? defaultModel : child.model(), workspace, maxSteps, child.permissionMode());
+                child.model() == null ? defaultModel : child.model(), workspace, maxSteps, child.permissionMode(),
+                contextBudget.requestTokenBudget(), contextBudget.triggerPercent(), contextBudget.imageTokenReserve());
         String identity = "\nSubagent identity: " + child.id() + " (" + child.name() + ").\n";
         if (prior != null) {
             int marker = prior.indexOf("\nSubagent identity:");

@@ -134,7 +134,8 @@ final class ApprovalRouter implements ApprovalPolicy {
     @Override
     public boolean approve(Tool tool, JsonNode arguments) {
         if (bypassRules) return fallback.approve(tool, arguments);
-        String preview = ApprovalPrompt.flatten(tool.preview(arguments));
+        String preview = ToolPreview.safeText(ApprovalPrompt.flatten(tool.preview(arguments)));
+        String canonicalArguments = SessionRules.normalizeArguments(arguments);
         Supplier<SessionRules> supplier = rulesSupplier;
         if (supplier != null) {
             SessionRules active = supplier.get();
@@ -145,8 +146,8 @@ final class ApprovalRouter implements ApprovalPolicy {
                 if (decision == SessionRules.Decision.ALLOW) return true;
             }
         }
-        if (grants.allows(tool.name(), preview)) return true;
-        return prompt(tool, arguments, preview);
+        if (grants.allows(tool.name(), canonicalArguments)) return true;
+        return prompt(tool, arguments, preview, canonicalArguments);
     }
 
     /** Captures the parent's current deny authority without inheriting allows or grants. */
@@ -162,27 +163,29 @@ final class ApprovalRouter implements ApprovalPolicy {
             @Override
             public boolean approve(Tool tool, JsonNode arguments) {
                 if (preflightDeny(tool, arguments)) return false;
-                return prompt(tool, arguments, ApprovalPrompt.flatten(tool.preview(arguments)));
+                return prompt(tool, arguments,
+                        ToolPreview.safeText(ApprovalPrompt.flatten(tool.preview(arguments))),
+                        SessionRules.normalizeArguments(arguments));
             }
         };
     }
 
-    private boolean prompt(Tool tool, JsonNode arguments, String preview) {
+    private boolean prompt(Tool tool, JsonNode arguments, String preview, String canonicalArguments) {
         Channel active = channel;
         if (active == null) return fallback.approve(tool, arguments);
         try {
             Request request = new Request(tool.name(), preview, false);
             pending.put(request);
-            return settle(request.await(), tool.name(), preview);
+            return settle(request.await(), tool.name(), canonicalArguments);
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             return false;
         }
     }
 
-    private boolean settle(String reply, String tool, String preview) {
+    private boolean settle(String reply, String tool, String canonicalArguments) {
         if (CANCELLED.equals(reply)) return false;
-        if ("always".equals(reply)) grants.grant(tool, preview);
+        if ("always".equals(reply)) grants.grant(tool, canonicalArguments);
         return !"no".equals(reply);
     }
 

@@ -8,6 +8,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.NotDirectoryException;
 import java.nio.file.Path;
 import java.util.Base64;
 import java.util.Objects;
@@ -19,6 +21,19 @@ final class ImageAttachment {
     private final Path path;
     private final String mediaType;
     private final byte[] bytes;
+
+    static final class ImageNotFoundException extends IOException {
+        ImageNotFoundException(String input, IOException cause) { super(input, cause); }
+        ImageNotFoundException(String input) { super(input); }
+    }
+
+    static final class ImageTooLargeException extends IOException {
+        ImageTooLargeException(String input) { super("image exceeds the 20 MiB limit: " + input); }
+    }
+
+    static final class UnsupportedImageTypeException extends IOException {
+        UnsupportedImageTypeException(String input) { super("unsupported image type: " + input); }
+    }
 
     ImageAttachment(Path path, String mediaType, byte[] bytes) {
         path = path.toAbsolutePath().normalize();
@@ -64,29 +79,32 @@ final class ImageAttachment {
         if (input == null || input.isBlank()) throw new IllegalArgumentException("image path must not be blank");
         String normalized = normalize(input);
         Path supplied = Path.of(normalized);
-        Path resolved = (supplied.isAbsolute() ? supplied : workspace.resolve(supplied)).toRealPath();
-        if (!Files.isRegularFile(resolved, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(resolved)) {
-            throw new IOException("image is not a regular file: " + input);
-        }
-        long size = Files.size(resolved);
-        if (size > MAX_IMAGE_BYTES) throw new IOException("image exceeds the 20 MiB limit: " + input);
-        byte[] bytes;
-        try (InputStream source = Files.newInputStream(resolved);
-             ByteArrayOutputStream kept = new ByteArrayOutputStream((int) Math.min(size, MAX_IMAGE_BYTES))) {
-            byte[] buffer = new byte[64 * 1024];
-            int total = 0;
-            for (int count; (count = source.read(buffer)) >= 0;) {
-                if (count > MAX_IMAGE_BYTES - total) {
-                    throw new IOException("image exceeds the 20 MiB limit: " + input);
-                }
-                kept.write(buffer, 0, count);
-                total += count;
+        Path unresolved = supplied.isAbsolute() ? supplied : workspace.resolve(supplied);
+        try {
+            Path resolved = unresolved.toRealPath();
+            if (!Files.isRegularFile(resolved, LinkOption.NOFOLLOW_LINKS)) {
+                throw new ImageNotFoundException(input);
             }
-            bytes = kept.toByteArray();
+            long size = Files.size(resolved);
+            if (size > MAX_IMAGE_BYTES) throw new ImageTooLargeException(input);
+            byte[] bytes;
+            try (InputStream source = Files.newInputStream(resolved);
+                 ByteArrayOutputStream kept = new ByteArrayOutputStream((int) Math.min(size, MAX_IMAGE_BYTES))) {
+                byte[] buffer = new byte[64 * 1024];
+                int total = 0;
+                for (int count; (count = source.read(buffer)) >= 0;) {
+                    if (count > MAX_IMAGE_BYTES - total) throw new ImageTooLargeException(input);
+                    kept.write(buffer, 0, count);
+                    total += count;
+                }
+                bytes = kept.toByteArray();
+            }
+            String mediaType = detectMediaType(bytes);
+            if (mediaType == null) throw new UnsupportedImageTypeException(input);
+            return new ImageAttachment(resolved, mediaType, bytes);
+        } catch (NoSuchFileException | NotDirectoryException missing) {
+            throw new ImageNotFoundException(input, missing);
         }
-        String mediaType = detectMediaType(bytes);
-        if (mediaType == null) throw new IOException("unsupported image type: " + input);
-        return new ImageAttachment(resolved, mediaType, bytes);
     }
 
     ObjectNode inputPart(ObjectMapper json, String detail) {

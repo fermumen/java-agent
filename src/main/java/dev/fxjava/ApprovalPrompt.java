@@ -44,9 +44,9 @@ final class ApprovalPrompt {
         }
     }
 
-    /** Stable identity of a request: tool plus whitespace-normalized preview. */
-    static String grantKey(String tool, String preview) {
-        return tool.toLowerCase(Locale.ROOT) + "\u0000" + flatten(preview).toLowerCase(Locale.ROOT);
+    /** Stable identity of a request: exact tool name plus canonical argument JSON. */
+    static String grantKey(String tool, String canonicalArguments) {
+        return tool + "\u0000" + canonicalArguments;
     }
 
     static String flatten(String value) {

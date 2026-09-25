@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.io.PrintStream;
 import java.net.URISyntaxException;
 import java.nio.file.Files;
@@ -34,6 +35,7 @@ public final class Agent {
     private final int maxSteps;
     private final ToolResultStore resultStore;
     private final ParentContext parentContext;
+    private final ContextBudget contextBudget;
     private TurnListener turnListener = TurnListener.NONE;
     private String instructions;
     private long turnInputTokens;
@@ -74,6 +76,14 @@ public final class Agent {
     Agent(ObjectMapper json, ResponsesClient client, List<Tool> tools,
           ApprovalPolicy approvalPolicy, PrintStream progress, int maxSteps,
           String systemPrompt, ToolResultStore resultStore, ParentContext parentContext) {
+        this(json, client, tools, approvalPolicy, progress, maxSteps, systemPrompt,
+                resultStore, parentContext, new ContextBudget());
+    }
+
+    Agent(ObjectMapper json, ResponsesClient client, List<Tool> tools,
+          ApprovalPolicy approvalPolicy, PrintStream progress, int maxSteps,
+          String systemPrompt, ToolResultStore resultStore, ParentContext parentContext,
+          ContextBudget contextBudget) {
         this.json = json;
         this.client = client;
         this.tools = tools.stream().collect(Collectors.toUnmodifiableMap(Tool::name, Function.identity()));
@@ -85,6 +95,21 @@ public final class Agent {
         this.instructions = systemPrompt;
         this.resultStore = resultStore;
         this.parentContext = parentContext;
+        this.contextBudget = Objects.requireNonNull(contextBudget, "contextBudget");
+    }
+
+    ContextBudget contextBudget() { return contextBudget; }
+
+    long fixedRequestTokens() throws IOException {
+        long fixed = contextBudget.estimateTextTokens(instructions)
+                + contextBudget.estimateTokens(buildToolDefinitions(toolCatalog));
+        if (parentContext != null) {
+            PreparedParentContext prepared = parentContext.prepare();
+            if (prepared != null && !prepared.content().isBlank()) {
+                fixed += contextBudget.estimateTextTokens(prepared.content());
+            }
+        }
+        return fixed;
     }
 
     public String prompt(String input) throws IOException, InterruptedException {
@@ -98,7 +123,12 @@ public final class Agent {
 
     public String prompt(String input, Consumer<String> textDelta, TurnListener listener)
             throws IOException, InterruptedException {
-        return runTurn(null, input, textDelta, listener);
+        return runTurn(null, input, textDelta, listener, HistoryCheckpoint.NONE);
+    }
+
+    String prompt(String input, Consumer<String> textDelta, TurnListener listener,
+                  HistoryCheckpoint checkpoint) throws IOException, InterruptedException {
+        return runTurn(null, input, textDelta, listener, checkpoint);
     }
 
     /**
@@ -108,37 +138,49 @@ public final class Agent {
      * replay, and persistence behave identically to {@link #prompt}.
      */
     String promptWithUserMessage(ObjectNode userMessage, Consumer<String> textDelta,
-                                 TurnListener listener) throws IOException, InterruptedException {
-        return runTurn(Objects.requireNonNull(userMessage, "userMessage"), null, textDelta, listener);
+                                 TurnListener listener, HistoryCheckpoint checkpoint)
+            throws IOException, InterruptedException {
+        return runTurn(Objects.requireNonNull(userMessage, "userMessage"), null,
+                textDelta, listener, checkpoint);
     }
 
     private String runTurn(ObjectNode prebuiltUserMessage, String textInput,
-                           Consumer<String> textDelta, TurnListener listener)
+                           Consumer<String> textDelta, TurnListener listener,
+                           HistoryCheckpoint checkpoint)
             throws IOException, InterruptedException {
         lastToolCalls.clear();
         turnListener = listener == null ? TurnListener.NONE : listener;
         turnInputTokens = 0;
         turnOutputTokens = 0;
+        ToolExecutionState execution = new ToolExecutionState();
         if (prebuiltUserMessage != null) addUserMessage(prebuiltUserMessage);
         else addUserMessage(textInput);
         try {
+            checkpointHistory(checkpoint);
             for (int step = 0; step < maxSteps; step++) {
+                PreparedParentContext prepared = parentContext == null ? null : parentContext.prepare();
+                ArrayNode definitions = buildToolDefinitions(toolCatalog);
+                long fixedRequestTokens = contextBudget.estimateTextTokens(instructions)
+                        + contextBudget.estimateTokens(definitions);
+                if (prepared != null && !prepared.content().isBlank()) {
+                    fixedRequestTokens += contextBudget.estimateTextTokens(prepared.content());
+                }
+                compactIfNeeded(fixedRequestTokens, checkpoint);
+
                 ArrayNode requestInput = inputHistory.deepCopy();
                 // fx projects history-layer summaries into plain messages before
                 // any gateway call; the raw item never crosses the wire.
                 ConversationCompactor.projectSummariesForWire(requestInput);
-                PreparedParentContext prepared = parentContext == null ? null : parentContext.prepare();
                 if (prepared != null && !prepared.content().isBlank()) {
                     ObjectNode context = json.createObjectNode().put("role", "system")
                             .put("content", prepared.content());
                     requestInput.insert(0, context);
                 }
-                ObjectNode response = client.complete(requestInput, buildToolDefinitions(toolCatalog),
-                        instructions, textDelta);
+                checkCancellation("before gateway request");
+                ObjectNode response = client.complete(requestInput, definitions, instructions, textDelta);
                 long[] usage = OpenAiResponsesClient.parseUsage(response);
                 turnInputTokens += usage[0];
                 turnOutputTokens += usage[1];
-                if (prepared != null) parentContext.acknowledge(prepared);
                 ArrayNode output = (ArrayNode) response.path("output");
                 List<JsonNode> functionCalls = new ArrayList<>();
 
@@ -147,13 +189,89 @@ public final class Agent {
                     if (item.path("type").asText().equals("function_call")) functionCalls.add(item);
                 }
 
+                // The model response becomes durable before any returned tool
+                // call can run. This is the intent checkpoint for mutations.
+                checkpointHistory(checkpoint);
+                if (prepared != null) parentContext.acknowledge(prepared);
                 if (functionCalls.isEmpty()) return extractOutputText(output);
-                for (JsonNode call : functionCalls) executeToolCall(call);
+                for (JsonNode call : functionCalls) {
+                    execution.begin(call);
+                    executeToolCall(call, execution);
+                    if (Thread.currentThread().isInterrupted()) {
+                        throw new InterruptedException("tool execution was interrupted");
+                    }
+                    checkpointHistory(checkpoint);
+                    execution.clear();
+                }
             }
             throw new IOException("Agent stopped after reaching the " + maxSteps + " step limit");
+        } catch (InterruptedException interrupted) {
+            Thread.interrupted();
+            try {
+                closePendingToolCalls(execution, true);
+                checkpointHistory(checkpoint);
+            } catch (IOException | InterruptedException repairFailure) {
+                interrupted.addSuppressed(repairFailure);
+            } finally {
+                Thread.interrupted();
+                Thread.currentThread().interrupt();
+            }
+            throw interrupted;
+        } catch (IOException failure) {
+            boolean restoreInterrupt = Thread.interrupted();
+            try {
+                closePendingToolCalls(execution, false);
+                checkpointHistory(checkpoint);
+            } catch (IOException repairFailure) {
+                failure.addSuppressed(repairFailure);
+            } catch (InterruptedException repairCancellation) {
+                failure.addSuppressed(repairCancellation);
+                restoreInterrupt = true;
+            } finally {
+                boolean interruptedDuringRepair = Thread.interrupted();
+                if (restoreInterrupt || interruptedDuringRepair) Thread.currentThread().interrupt();
+            }
+            throw failure;
+        } catch (RuntimeException failure) {
+            boolean restoreInterrupt = Thread.interrupted();
+            try {
+                closePendingToolCalls(execution, false);
+                checkpointHistory(checkpoint);
+            } catch (Exception repairFailure) {
+                failure.addSuppressed(repairFailure);
+                if (repairFailure instanceof InterruptedException) restoreInterrupt = true;
+            } finally {
+                boolean interruptedDuringRepair = Thread.interrupted();
+                if (restoreInterrupt || interruptedDuringRepair) Thread.currentThread().interrupt();
+            }
+            throw failure;
         } finally {
-            turnListener.onUsage(turnInputTokens, turnOutputTokens);
+            notifyUsage(turnInputTokens, turnOutputTokens);
         }
+    }
+
+    private void compactIfNeeded(long fixedRequestTokens, HistoryCheckpoint checkpoint)
+            throws IOException, InterruptedException {
+        if (!contextBudget.shouldCompact(inputHistory, fixedRequestTokens)) return;
+        checkCancellation("before automatic compaction");
+        // Reject irreducible histories before paying for a summary request.
+        ConversationCompactor.rebuildForBudget(json, inputHistory, "x", contextBudget, fixedRequestTokens);
+        ArrayNode summaryFraming = json.createArrayNode();
+        ObjectNode summaryMessage = summaryFraming.addObject().put("role", "user");
+        summaryMessage.put("content", "");
+        long summaryFixedTokens = contextBudget.estimateTokens(summaryFraming)
+                + contextBudget.estimateTextTokens(ConversationCompactor.SUMMARIZER_INSTRUCTIONS) + 32;
+        String transcript = ConversationCompactor.renderTranscript(inputHistory, contextBudget, summaryFixedTokens);
+        SummarizeResult summarized = summarizeWithUsage(transcript, ConversationCompactor.SUMMARIZER_INSTRUCTIONS);
+        turnInputTokens += summarized.inputTokens;
+        turnOutputTokens += summarized.outputTokens;
+        // Meter the summary request even if its result cannot fit or history save fails.
+        checkpointHistory(checkpoint);
+        ArrayNode rebuilt = ConversationCompactor.rebuildForBudget(json, inputHistory,
+                summarized.summary, contextBudget, fixedRequestTokens);
+        checkpointSnapshot(checkpoint, rebuilt);
+        inputHistory.removeAll();
+        for (JsonNode item : rebuilt) inputHistory.add(item.deepCopy());
     }
 
     /**
@@ -241,56 +359,171 @@ public final class Agent {
             ObjectNode output = inputHistory.addObject();
             output.put("type", "function_call_output");
             output.put("call_id", callId);
-            output.put("output", "Error: previous tool execution was interrupted before completion");
+            output.put("output", "Error: previous tool call may have been interrupted; its outcome is uncertain, "
+                    + "and it will not be replayed");
         }
     }
 
-    private void executeToolCall(JsonNode call) throws IOException, InterruptedException {
+    private void executeToolCall(JsonNode call, ToolExecutionState execution)
+            throws IOException, InterruptedException {
         String callId = call.path("call_id").asText();
         String name = call.path("name").asText();
         String rawArguments = call.path("arguments").asText("{}");
         if (callId.isBlank()) throw new IOException("OpenAI returned a function call without call_id");
 
-        String result;
+        ToolResult result;
         boolean policyDenied = false;
         Tool tool = resolveTool(name);
         if (tool == null || !tool.advertised()) {
-            result = "Error: unknown tool '" + name + "'";
+            result = ToolResult.error("Error: unknown tool '" + name + "'");
         } else {
             try {
+                checkCancellation("before tool execution");
                 JsonNode arguments = json.readTree(rawArguments);
                 if (arguments == null || !arguments.isObject()) {
                     throw new IllegalArgumentException("tool arguments must be a JSON object");
                 }
-                String preview = tool.preview(arguments);
+                String preview = ToolPreview.safeText(tool.preview(arguments));
                 progress.println("[tool] " + preview);
-                turnListener.onToolStart(name, preview);
+                notifyToolStart(name, preview);
+                execution.started = true;
+                checkCancellation("before tool execution");
                 if (approvalPolicy.preflightDeny(tool, arguments)
                         || (tool.requiresApproval(arguments) && !approvalPolicy.approve(tool, arguments))) {
                     policyDenied = true;
-                    result = "Error: user denied this tool call";
+                    result = ToolResult.error("Error: user denied this tool call");
                 } else {
-                    result = tool.execute(arguments, callId);
+                    checkCancellation("before tool execution");
+                    execution.invoked = true;
+                    result = Objects.requireNonNull(tool.executeResult(arguments, callId),
+                            "tool returned no outcome");
                 }
             } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
                 throw interrupted;
             } catch (Exception error) {
-                result = "Error: " + safeMessage(error);
+                if (error instanceof InterruptedIOException || Thread.currentThread().isInterrupted()) {
+                    InterruptedException interrupted = new InterruptedException("tool execution was interrupted");
+                    interrupted.initCause(error);
+                    throw interrupted;
+                }
+                result = ToolResult.error("Error: " + safeMessage(error));
             }
         }
 
-        boolean toolError = policyDenied || tool == null || tool.isErrorResult(result);
+        boolean toolError = policyDenied || tool == null || result.isError();
+        String output = result.output();
         if (resultStore != null && !name.equals("read_tool_result")) {
-            result = resultStore.prepare(callId, name, result);
+            output = resultStore.prepare(callId, name, output);
         }
 
         lastToolCalls.add(new ToolCallRecord(name, toolError ? "error" : "success"));
-        turnListener.onToolEnd(name, toolError);
+        notifyToolEnd(name, toolError);
         ObjectNode toolOutput = inputHistory.addObject();
         toolOutput.put("type", "function_call_output");
         toolOutput.put("call_id", callId);
-        toolOutput.put("output", result);
+        toolOutput.put("output", output);
+    }
+
+    private void checkpointHistory(HistoryCheckpoint checkpoint)
+            throws IOException, InterruptedException {
+        checkpointSnapshot(checkpoint, inputHistory);
+    }
+
+    private void checkpointSnapshot(HistoryCheckpoint checkpoint, ArrayNode history)
+            throws IOException, InterruptedException {
+        checkCancellation("before history checkpoint");
+        if (checkpoint != null) {
+            try {
+                checkpoint.checkpoint(history.deepCopy(), turnInputTokens, turnOutputTokens);
+            } catch (RuntimeException failure) {
+                throw new IOException("could not checkpoint the active conversation", failure);
+            }
+        }
+    }
+
+    private boolean closePendingToolCalls(ToolExecutionState execution, boolean interrupted) throws IOException {
+        Map<String, JsonNode> pending = new java.util.LinkedHashMap<>();
+        for (JsonNode item : inputHistory) {
+            String id = item.path("call_id").asText();
+            if (id.isBlank()) continue;
+            String type = item.path("type").asText();
+            if (type.equals("function_call")) pending.putIfAbsent(id, item);
+            else if (type.equals("function_call_output")) pending.remove(id);
+        }
+        if (pending.isEmpty()) {
+            execution.clear();
+            return false;
+        }
+        for (Map.Entry<String, JsonNode> entry : pending.entrySet()) {
+            String id = entry.getKey();
+            String name = entry.getValue().path("name").asText("unknown tool");
+            boolean active = id.equals(execution.callId);
+            boolean started = active && execution.started;
+            String detail;
+            if (active && execution.invoked && interrupted) {
+                detail = "Error: tool execution was interrupted; the outcome is uncertain and will not be retried";
+            } else if (active && execution.invoked) {
+                detail = "Error: tool execution stopped before its result was checkpointed; the outcome is uncertain "
+                        + "and will not be retried";
+            } else {
+                detail = "Error: tool call was not started because the turn stopped; it will not be replayed";
+            }
+            appendToolOutput(id, name, detail);
+            if (started) notifyToolEnd(name, true);
+        }
+        execution.clear();
+        return true;
+    }
+
+    private void appendToolOutput(String callId, String name, String output) throws IOException {
+        String saved = resultStore == null || name.equals("read_tool_result")
+                ? output : resultStore.prepare(callId, name, output);
+        lastToolCalls.add(new ToolCallRecord(name, "error"));
+        ObjectNode toolOutput = inputHistory.addObject();
+        toolOutput.put("type", "function_call_output");
+        toolOutput.put("call_id", callId);
+        toolOutput.put("output", saved);
+    }
+
+    private static void checkCancellation(String stage) throws InterruptedException {
+        if (Thread.interrupted()) throw new InterruptedException("turn interrupted " + stage);
+    }
+
+    private void notifyToolStart(String name, String preview) {
+        try { turnListener.onToolStart(name, preview); } catch (RuntimeException ignored) { }
+    }
+
+    private void notifyToolEnd(String name, boolean error) {
+        try { turnListener.onToolEnd(name, error); } catch (RuntimeException ignored) { }
+    }
+
+    private void notifyUsage(long input, long output) {
+        try { turnListener.onUsage(input, output); } catch (RuntimeException ignored) { }
+    }
+
+    @FunctionalInterface
+    interface HistoryCheckpoint {
+        void checkpoint(ArrayNode history, long inputTokens, long outputTokens) throws IOException;
+
+        HistoryCheckpoint NONE = (history, input, output) -> { };
+    }
+
+    private static final class ToolExecutionState {
+        private String callId;
+        private boolean started;
+        private boolean invoked;
+
+        void begin(JsonNode call) {
+            callId = call.path("call_id").asText();
+            started = false;
+            invoked = false;
+        }
+
+        void clear() {
+            callId = null;
+            started = false;
+            invoked = false;
+        }
     }
 
     private Tool resolveTool(String name) throws IOException {
@@ -386,17 +619,19 @@ public final class Agent {
                         + "- Commons Math: statistics, regression, linear algebra, optimization, and numerical methods.\n"
                         + "- TwelveMonkeys ImageIO: enhanced JPEG, TIFF, BMP, and PSD support through ImageIO.\n"
                         + "- XChart: line, scatter, bar, histogram, pie, heatmap, and box charts with image export.\n"
-                        + "Use JShell for Office, PDF, CSV, JSON/YAML, HTML, Markdown, archive, image, chart, text,\n"
-                        + "codec, math, and similar document-processing tasks. Prefer writing a reusable .jsh script in the\n"
-                        + "workspace, then run `jshell --class-path \"%s\" script.jsh`. The production shell is Windows\n"
+                        + "For artifact-producing Office, PDF, CSV, JSON/YAML, HTML, Markdown, archive, image, chart,\n"
+                        + "text, codec, math, and similar tasks, prefer a reusable Java source-file program. Uncaught\n"
+                        + "exceptions produce a failing process status; after writing an artifact, reopen it and assert its\n"
+                        + "contents or structure. Run it with `java --class-path \"%s\" Script.java`. Use JShell for\n"
+                        + "exploration, or only when the snippet explicitly reports failures and validates its outputs. The\n"
+                        + "production shell is Windows\n"
                         + "cmd.exe; tests may run in a Linux shell. Quote the JAR and script paths, use the host's path syntax,\n"
-                        + "and do not assume Unix commands exist on Windows. For a normal Java source-file script, use\n"
-                        + "`java --class-path \"%s\" Script.java`. Do not download dependencies at runtime.\n"
+                        + "and do not assume Unix commands exist on Windows. Do not download dependencies at runtime.\n"
                         + "\n"
                         + "Workspace: %s\n"
                         + "Permission mode: %s\n"
                         + "Current date: %s\n",
-                productivityJar, productivityJar, productivityJar, config.workspace(),
+                productivityJar, productivityJar, config.workspace(),
                 config.permissionMode().name().toLowerCase(java.util.Locale.ROOT), LocalDate.now());
     }
 

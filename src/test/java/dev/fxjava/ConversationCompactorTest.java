@@ -45,7 +45,8 @@ class ConversationCompactorTest {
             }
         }
         assertEquals(ConversationCompactor.KEEP_EXCHANGES, keptExchanges);
-        assertFalse(rebuilt.toString().contains("user 0"), "summarized prefix is gone");
+        assertTrue(rebuilt.get(0).path("original_user_context").asText().contains("user 0"),
+                "the original user objective remains available after its exchange is summarized");
     }
 
     @Test
@@ -79,6 +80,92 @@ class ConversationCompactorTest {
         }
         assertTrue(rebuilt.get(1).path("role").asText().equals("user"),
                 "tail starts at the user message opening the third-from-last exchange");
+    }
+
+    @Test
+    void actualMultimodalUserContentIsRenderedAndOldImageTurnsFoldWithoutPayload() throws Exception {
+        ArrayNode input = conversation(5);
+        ObjectNode firstUser = (ObjectNode) input.get(0);
+        ArrayNode parts = json.createArrayNode();
+        parts.addObject().put("type", "input_text").put("text", "IMPORTANT_INSTRUCTION: retain the user objective");
+        parts.addObject().put("type", "input_image")
+                .put("image_url", "data:image/png;base64,PRIVATE_BASE64_PAYLOAD_SHOULD_NOT_APPEAR")
+                .put("detail", "auto");
+        firstUser.set("content", parts);
+
+        String transcript = ConversationCompactor.renderTranscript(input);
+        assertTrue(transcript.contains("IMPORTANT_INSTRUCTION"), transcript);
+        assertTrue(transcript.contains("<image png>"), transcript);
+        assertFalse(transcript.contains("PRIVATE_BASE64_PAYLOAD"), "image data must not reach the summarizer");
+
+        ArrayNode once = ConversationCompactor.rebuild(json, input, "Summary keeps the objective and image turn.");
+        JsonNode summary = once.get(0);
+        assertTrue(summary.path("original_user_context").asText().contains("IMPORTANT_INSTRUCTION"));
+        assertTrue(summary.path("original_user_context").asText().contains("<image png>"));
+        assertFalse(summary.toString().contains("PRIVATE_BASE64_PAYLOAD"));
+
+        ArrayNode grown = once.deepCopy();
+        grown.addObject().put("role", "assistant").put("content", "next answer");
+        grown.addObject().put("role", "user").put("content", "latest task remains verbatim");
+        String foldedTranscript = ConversationCompactor.renderTranscript(grown);
+        assertTrue(foldedTranscript.startsWith("Prior summary (from an earlier compaction):\n"));
+        assertTrue(foldedTranscript.contains("Original user request and constraints (retained verbatim):\n"
+                + "IMPORTANT_INSTRUCTION: retain the user objective <image png>"), foldedTranscript);
+        assertTrue(foldedTranscript.contains("Latest user request (retained verbatim):\nlatest task remains verbatim"));
+        assertFalse(foldedTranscript.contains("PRIVATE_BASE64_PAYLOAD"));
+
+        ObjectNode projected = json.createObjectNode();
+        projected.setAll((ObjectNode) summary);
+        ArrayNode wire = json.createArrayNode().add(projected);
+        ConversationCompactor.projectSummariesForWire(wire);
+        assertTrue(wire.get(0).path("content").asText().contains("IMPORTANT_INSTRUCTION"));
+        assertFalse(wire.toString().contains("PRIVATE_BASE64_PAYLOAD"));
+    }
+
+    @Test
+    void budgetRebuildShrinksLongSingleTurnLoopsOnlyAtCompleteToolGroups() throws Exception {
+        ArrayNode input = json.createArrayNode();
+        input.addObject().put("role", "user").put("content", "Keep the original repair objective.");
+        for (int round = 0; round < 8; round++) {
+            input.addObject().put("type", "reasoning").put("summary", "reasoning " + round);
+            input.addObject().put("type", "message").put("role", "assistant")
+                    .put("content", "Working on step " + round);
+            input.addObject().put("type", "function_call").put("call_id", "call-" + round)
+                    .put("name", "read_file").put("arguments", "{\"path\":\"" + "a".repeat(700) + "\"}");
+            input.addObject().put("type", "function_call_output").put("call_id", "call-" + round)
+                    .put("output", "b".repeat(700));
+        }
+
+        ContextBudget budget = new ContextBudget(1_500, 80, 128);
+        assertTrue(budget.shouldCompact(input));
+        String transcript = ConversationCompactor.renderTranscript(input, budget, 0);
+        assertTrue(budget.estimateTextTokens(transcript) + 6 <= budget.triggerTokenBudget());
+        assertTrue(transcript.contains("Keep the original repair objective."));
+
+        ArrayNode rebuilt = ConversationCompactor.rebuildForBudget(json, input, "Recent tool work summary.",
+                budget, 0);
+        assertTrue(budget.fits(rebuilt, 0));
+        assertTrue(rebuilt.size() < input.size());
+        assertEquals("Keep the original repair objective.", rebuilt.get(1).path("content").asText());
+        assertTrue(toolPairsIntact(rebuilt));
+        for (JsonNode item : rebuilt) {
+            if (item.path("type").asText().equals("function_call")) {
+                assertTrue(item.path("call_id").asText().startsWith("call-"));
+            }
+        }
+        assertTrue(rebuilt.get(0).path("original_user_context").asText()
+                .contains("Keep the original repair objective."));
+    }
+
+    @Test
+    void irreducibleUserRequestFailsBeforeACompactionCanBeSent() {
+        ArrayNode input = json.createArrayNode();
+        input.addObject().put("role", "user").put("content", "important constraints " + "x".repeat(8_000));
+        ContextBudget budget = new ContextBudget(1_000, 80, 0);
+
+        assertThrows(IOException.class, () -> ConversationCompactor.renderTranscript(input, budget, 200));
+        assertThrows(IOException.class, () -> ConversationCompactor.rebuildForBudget(json, input,
+                "short summary", budget, 200));
     }
 
     @Test
@@ -128,9 +215,9 @@ class ConversationCompactorTest {
     }
 
     @Test
-    void oversizedTranscriptsDropOldestLinesUnderTheByteBudget() {
+    void oversizedTranscriptsDropOldestLinesUnderTheByteBudget() throws Exception {
         StringBuilder huge = new StringBuilder();
-        huge.append("{\"role\":\"user\",\"content\":\"").append("x".repeat(200_000)).append("\"}");
+        huge.append("{\"role\":\"assistant\",\"content\":\"").append("x".repeat(200_000)).append("\"}");
         ArrayNode input = null;
         try {
             input = (ArrayNode) json.readTree("[" + huge + "]");
@@ -152,13 +239,14 @@ class ConversationCompactorTest {
     }
 
     @Test
-    void oversizedTranscriptsKeepThePriorSummaryBlockWithinBudget() {
+    void oversizedTranscriptsKeepThePriorSummaryBlockWithinBudget() throws Exception {
         ArrayNode input = json.createArrayNode();
         input.addObject().put("type", "compacted_summary")
                 .put("summary_text", "PRIOR-SUMMARY-MARKER goals and open work")
                 .put("compaction_count", 1).put("removed_item_count", 4);
         StringBuilder huge = new StringBuilder();
-        huge.append("{\"role\":\"user\",\"content\":\"").append("x".repeat(200_000)).append("\"}");
+        huge.append("{\"role\":\"assistant\",\"content\":\"").append("x".repeat(200_000)).append("\"}");
+        input.addObject().put("role", "user").put("content", "original task remains visible");
         try {
             ArrayNode tail = (ArrayNode) json.readTree("[" + huge + "]");
             input.addAll(tail);
@@ -177,13 +265,14 @@ class ConversationCompactorTest {
                 "transcript stays inside its byte budget");
         assertTrue(transcript.startsWith("Prior summary (from an earlier compaction):\n"
                 + "PRIOR-SUMMARY-MARKER"), "prior summary is exempt from the byte budget");
+        assertTrue(transcript.contains("original task remains visible"));
         assertTrue(transcript.contains("(older transcript lines omitted)"));
         assertTrue(transcript.contains("tail question 5"), "recent lines survive truncation");
         assertFalse(transcript.contains("x".repeat(1000)), "oldest content is dropped first");
     }
 
     @Test
-    void oversizedPriorSummariesAreTruncatedWithAnExplicitMarkerNotDropped() {
+    void oversizedPriorSummariesAreTruncatedWithAnExplicitMarkerNotDropped() throws Exception {
         ArrayNode input = json.createArrayNode();
         StringBuilder giant = new StringBuilder();
         while (giant.length() < 150_000) {
@@ -263,5 +352,15 @@ class ConversationCompactorTest {
             if (item.path("type").asText().equals("compacted_summary")) summaries++;
         }
         return summaries;
+    }
+
+    private boolean toolPairsIntact(ArrayNode input) {
+        java.util.Set<String> calls = new java.util.HashSet<>();
+        java.util.Set<String> outputs = new java.util.HashSet<>();
+        for (JsonNode item : input) {
+            if (item.path("type").asText().equals("function_call")) calls.add(item.path("call_id").asText());
+            if (item.path("type").asText().equals("function_call_output")) outputs.add(item.path("call_id").asText());
+        }
+        return calls.equals(outputs);
     }
 }

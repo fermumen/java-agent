@@ -45,9 +45,7 @@ final class CompactCommands {
 
     /** Friendly refusal line for conversations below the compaction threshold. */
     static String refusalLine(ArrayNode input) {
-        return "Nothing to compact yet (" + input.size() + " items; need at least "
-                + ConversationCompactor.MIN_ITEMS + " across at least "
-                + (ConversationCompactor.KEEP_EXCHANGES + 1) + " exchanges).";
+        return "Nothing to compact yet (" + input.size() + " items; no older context can be removed safely).";
     }
 
     /**
@@ -79,19 +77,33 @@ final class CompactCommands {
             throw new IllegalArgumentException(USAGE);
         }
         ArrayNode input = session.conversation();
-        if (!ConversationCompactor.eligible(input)) {
+        ContextBudget budget = session.contextBudget();
+        long fixedRequestTokens = session.fixedRequestTokens();
+        if (!ConversationCompactor.eligible(input, budget, fixedRequestTokens)) {
             throw new IllegalStateException(refusalLine(input));
         }
-        Agent.SummarizeResult summarized =
-                session.summarizeWithUsage(ConversationCompactor.renderTranscript(input));
+        // Prove that at least the pinned request and a summary item can fit
+        // before paying for the summarization round-trip.
+        ConversationCompactor.rebuildForBudget(JSON, input, "x", budget, fixedRequestTokens);
+        long summarizeOverhead = budget.estimateTextTokens(ConversationCompactor.SUMMARIZER_INSTRUCTIONS) + 16;
+        String transcript = ConversationCompactor.renderTranscript(input, budget, summarizeOverhead);
+        Agent.SummarizeResult summarized = session.summarizeWithUsage(transcript);
+        // Persist this separate round-trip's usage even if the model returns an
+        // empty summary or the resulting history cannot fit the configured budget.
+        try {
+            session.recordUsageOnly(summarized.inputTokens, summarized.outputTokens);
+        } catch (IOException persistenceFailure) {
+            throw new IOException("conversation left untouched: "
+                    + safeMessage(persistenceFailure), persistenceFailure);
+        }
         String summaryText = summarized.summary.strip();
         if (summaryText.isEmpty()) {
             throw new IOException("The model returned an empty summary; conversation left untouched");
         }
-        ArrayNode rebuilt = ConversationCompactor.rebuild(JSON, input, summaryText);
+        ArrayNode rebuilt = ConversationCompactor.rebuildForBudget(JSON, input, summaryText,
+                budget, fixedRequestTokens);
         try {
-            // Meter /compact's own round-trip into the same durable totals.
-            session.applyCompaction(rebuilt, summarized.inputTokens, summarized.outputTokens);
+            session.applyCompaction(rebuilt, 0, 0);
         } catch (IOException persistenceFailure) {
             throw new IOException("conversation left untouched: "
                     + safeMessage(persistenceFailure), persistenceFailure);

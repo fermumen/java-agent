@@ -98,14 +98,8 @@ final class TerminalTool implements Tool {
     @Override
     public String preview(JsonNode arguments) {
         String action = arguments.path("action").asText("?");
-        String target = arguments.path("command").isTextual() ? arguments.path("command").asText()
-                : arguments.path("session_id").asText("");
-        if (action.equals("monitor") && arguments.has("monitor")) target += " " + arguments.path("monitor");
-        if (action.equals("start") && arguments.path("initial_monitors").size() > 0) {
-            target += " monitors=" + arguments.path("initial_monitors");
-        }
-        if (target.length() > 120) target = target.substring(0, 120) + "...";
-        return "terminal " + action + (target.isBlank() ? "" : " `" + target + "`");
+        return "terminal " + action + " arguments="
+                + ToolPreview.redactedJson(JSON, "terminal", arguments);
     }
 
     @Override
@@ -140,6 +134,20 @@ final class TerminalTool implements Tool {
             default:
                 throw new IllegalArgumentException("terminal arguments must match the advertised action schema");
         }
+    }
+
+    @Override
+    public ToolResult executeResult(JsonNode rawArguments, String invocationId) throws Exception {
+        ObjectNode arguments = validate(rawArguments);
+        if (arguments.path("action").asText().equals("exec")) {
+            ObjectNode translated = JSON.createObjectNode().put("command", text(arguments, "command"));
+            if (arguments.path("cwd").isTextual()) {
+                translated.put("working_directory", arguments.path("cwd").asText());
+            }
+            return capturedCommand.executeResult(translated, invocationId);
+        }
+        String output = execute(arguments);
+        return isErrorResult(output) ? ToolResult.error(output) : ToolResult.success(output);
     }
 
     private String executeCaptured(ObjectNode arguments) throws Exception {
@@ -345,6 +353,8 @@ final class TerminalTool implements Tool {
         }
         session.closed = true;
         terminate(session, policy.equals("force"));
+        session.processTree.close();
+        try { session.process.getInputStream().close(); } catch (IOException ignored) { }
         Success response = success("close");
         response.body.set("session", facts(session));
         response.body.put("policy", policy);
@@ -354,22 +364,11 @@ final class TerminalTool implements Tool {
 
     private static void terminate(TerminalSession session, boolean force)
             throws IOException, InterruptedException {
-        List<ProcessHandle> descendants = session.process.descendants().collect(Collectors.toList());
         synchronized (session.stdin) {
             try { session.stdin.close(); } catch (IOException ignored) { }
         }
-        if (force) {
-            descendants.forEach(ProcessHandle::destroyForcibly);
-            session.process.destroyForcibly();
-        } else {
-            session.process.destroy();
-            descendants.forEach(ProcessHandle::destroy);
-        }
-        if (!session.process.waitFor(2, TimeUnit.SECONDS)) {
-            descendants.forEach(ProcessHandle::destroyForcibly);
-            session.process.destroyForcibly();
-            session.process.waitFor(2, TimeUnit.SECONDS);
-        }
+        session.processTree.terminate(force, force ? 0 : 2_000, 1_000);
+        try { session.process.getInputStream().close(); } catch (IOException ignored) { }
         session.joinReader();
         if (session.monitorThread != null && session.monitorThread != Thread.currentThread()) {
             session.monitorThread.join(2_000);
@@ -776,6 +775,7 @@ final class TerminalTool implements Tool {
         final String command;
         final Path cwd;
         final Process process;
+        final ProcessTreeCleanup processTree;
         final OutputStream stdin;
         final TerminalMonitors monitors;
         final ByteArrayOutputStream output = new ByteArrayOutputStream();
@@ -795,6 +795,7 @@ final class TerminalTool implements Tool {
             this.command = command;
             this.cwd = cwd;
             this.process = process;
+            this.processTree = new ProcessTreeCleanup(process, "java-agent-" + id + "-process-tree");
             this.stdin = process.getOutputStream();
             this.monitors = monitors;
         }

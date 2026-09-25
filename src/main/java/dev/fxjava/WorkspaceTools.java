@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -14,9 +15,8 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
 /** Compact catalog and shared Windows-oriented workspace boundary. */
@@ -90,6 +90,9 @@ public final class WorkspaceTools {
         @Override public String preview(JsonNode arguments) { return delegate.preview(arguments); }
         @Override public boolean isErrorResult(String result) { return delegate.isErrorResult(result); }
         @Override public String execute(JsonNode arguments) throws Exception { return delegate.execute(arguments); }
+        @Override public ToolResult executeResult(JsonNode arguments, String invocationId) throws Exception {
+            return delegate.executeResult(arguments, invocationId);
+        }
     }
 
     private static final class RunCommand implements Tool {
@@ -111,11 +114,17 @@ public final class WorkspaceTools {
         @Override public ObjectNode parameters() { return parameters; }
         @Override public boolean requiresApproval() { return true; }
         @Override public String preview(JsonNode args) {
-            return "run `" + abbreviate(optionalText(args, "command", "?"), 160) + "`";
+            return "run command in `" + ToolPreview.safeText(optionalText(args, "working_directory", "."))
+                    + "`: `" + ToolPreview.safeText(optionalText(args, "command", "?")) + "`";
         }
 
         @Override
         public String execute(JsonNode args) throws Exception {
+            return executeResult(args, null).output();
+        }
+
+        @Override
+        public ToolResult executeResult(JsonNode args, String invocationId) throws Exception {
             String command = requiredText(args, "command");
             int timeout = optionalInt(args, "timeout_seconds", 120, 1, 600);
             Path cwd = workspace.resolveExisting(optionalText(args, "working_directory", "."));
@@ -128,22 +137,76 @@ public final class WorkspaceTools {
             builder.environment().remove("JAVA_AGENT_API_KEY");
             builder.environment().remove("OPENAI_API_KEY");
             Process process = builder.directory(cwd.toFile()).redirectErrorStream(true).start();
-            CompletableFuture<String> output = CompletableFuture.supplyAsync(
-                    () -> readProcessOutput(process.getInputStream()));
-            boolean exited = process.waitFor(timeout, TimeUnit.SECONDS);
-            if (!exited) {
-                process.destroy();
-                if (!process.waitFor(2, TimeUnit.SECONDS)) process.destroyForcibly();
-            }
-            String captured;
+            ProcessTreeCleanup tree = new ProcessTreeCleanup(process, "java-agent-command-tree");
+            OutputCollector output = new OutputCollector(process.getInputStream());
+            output.start();
             try {
-                captured = output.get(5, TimeUnit.SECONDS);
-            } catch (TimeoutException error) {
-                throw new IOException("Timed out while collecting command output", error);
+                try (OutputStream stdin = process.getOutputStream()) {
+                    // Captured commands have no interactive stdin contract.
+                }
+                boolean exited = waitFor(process, timeout, tree);
+                if (!exited) {
+                    tree.terminate(false, 250, 1_000);
+                } else {
+                    tree.capture();
+                    if (tree.hasLiveDescendants()) tree.terminate(false, 100, 500);
+                }
+                boolean collected = output.await(1_500);
+                boolean collectionTimedOut = !collected;
+                if (!collected) {
+                    // An exited shell can leave a child holding its inherited pipe.
+                    tree.terminate(false, 100, 500);
+                    output.closePipe();
+                    collected = output.await(500);
+                }
+                String captured = output.text();
+                if (!collected || collectionTimedOut) {
+                    return ToolResult.error(appendLine(captured,
+                            "Error: command output collection did not finish after process cleanup"));
+                }
+                if (output.failure() != null) {
+                    return ToolResult.error(appendLine(captured,
+                            "Error: could not read command output: " + output.failure().getMessage()));
+                }
+                if (!exited) {
+                    return ToolResult.timeout(appendLine(captured,
+                            "Command timed out after " + timeout + " seconds"));
+                }
+                int exitCode = process.exitValue();
+                String result = appendLine(captured, "Exit code: " + exitCode);
+                return exitCode == 0 ? ToolResult.success(result) : ToolResult.error(result);
+            } catch (InterruptedException interrupted) {
+                tree.terminate(false, 250, 1_000);
+                output.closePipe();
+                output.stop();
+                throw interrupted;
+            } finally {
+                if (process.isAlive()) tree.terminate(false, 100, 500);
+                tree.close();
+                output.closePipe();
+                output.stop();
             }
-            if (!exited) return captured + "\nCommand timed out after " + timeout + " seconds";
-            return captured + (captured.endsWith("\n") || captured.isEmpty() ? "" : "\n")
-                    + "Exit code: " + process.exitValue();
+        }
+
+        private static boolean waitFor(Process process, int timeoutSeconds, ProcessTreeCleanup tree)
+                throws InterruptedException {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
+            while (process.isAlive()) {
+                tree.capture();
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0) return false;
+                long slice = Math.min(TimeUnit.MILLISECONDS.toNanos(50), remaining);
+                if (process.waitFor(slice, TimeUnit.NANOSECONDS)) {
+                    tree.capture();
+                    return true;
+                }
+            }
+            tree.capture();
+            return true;
+        }
+
+        private static String appendLine(String value, String line) {
+            return value + (value.endsWith("\n") || value.isEmpty() ? "" : "\n") + line;
         }
     }
 
@@ -268,25 +331,66 @@ public final class WorkspaceTools {
         return result;
     }
 
-    private static String readProcessOutput(InputStream input) {
-        try (input; ByteArrayOutputStream kept = new ByteArrayOutputStream()) {
-            byte[] buffer = new byte[8_192];
-            int total = 0;
-            boolean truncated = false;
-            for (int count; (count = input.read(buffer)) >= 0;) {
-                int retain = Math.min(count, Math.max(0, MAX_OUTPUT_BYTES - total));
-                if (retain > 0) kept.write(buffer, 0, retain);
-                total += retain;
-                if (retain < count) truncated = true;
-            }
-            String output = kept.toString(StandardCharsets.UTF_8);
-            return truncated ? output + "\n... output truncated at 200 KB" : output;
-        } catch (IOException error) {
-            return "Could not read command output: " + error.getMessage();
-        }
-    }
+    private static final class OutputCollector {
+        private final InputStream input;
+        private final ByteArrayOutputStream kept = new ByteArrayOutputStream();
+        private final CountDownLatch finished = new CountDownLatch(1);
+        private volatile IOException failure;
+        private volatile boolean truncated;
+        private volatile Thread worker;
 
-    private static String abbreviate(String value, int maxLength) {
-        return value.length() <= maxLength ? value : value.substring(0, maxLength) + "...";
+        OutputCollector(InputStream input) { this.input = input; }
+
+        void start() {
+            worker = new Thread(this::collect, "java-agent-command-output");
+            worker.setDaemon(true);
+            worker.start();
+        }
+
+        private void collect() {
+            try (InputStream source = input) {
+                byte[] buffer = new byte[8_192];
+                for (int count; (count = source.read(buffer)) >= 0;) {
+                    synchronized (kept) {
+                        int retain = Math.min(count, Math.max(0, MAX_OUTPUT_BYTES - kept.size()));
+                        if (retain > 0) kept.write(buffer, 0, retain);
+                        if (retain < count) truncated = true;
+                    }
+                }
+            } catch (IOException error) {
+                failure = error;
+            } finally {
+                finished.countDown();
+            }
+        }
+
+        boolean await(long timeoutMillis) throws InterruptedException {
+            return finished.await(timeoutMillis, TimeUnit.MILLISECONDS);
+        }
+
+        String text() {
+            synchronized (kept) {
+                String value = kept.toString(StandardCharsets.UTF_8);
+                return truncated ? value + "\n... output truncated at 200 KB" : value;
+            }
+        }
+
+        IOException failure() { return failure; }
+
+        void closePipe() {
+            try { input.close(); } catch (IOException ignored) { }
+        }
+
+        void stop() {
+            closePipe();
+            Thread thread = worker;
+            if (thread == null || thread == Thread.currentThread()) return;
+            thread.interrupt();
+            try {
+                thread.join(250);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 }

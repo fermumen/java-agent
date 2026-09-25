@@ -51,6 +51,47 @@ class ApprovalRouterTest {
     }
 
     @Test
+    void alwaysGrantDoesNotReuseTheSamePreviewForDifferentStructuredActions() throws Exception {
+        Tool command = new FixedTool("run_command", "run `echo Exact`");
+        ApprovalRouter router = new ApprovalRouter((asked, arguments) -> false);
+        RecordingChannel channel = new RecordingChannel("always");
+        router.attach(channel);
+
+        assertTrue(approveWithShell(router, command, arguments(
+                "{\"command\":\"echo Exact\",\"working_directory\":\"src\"}"), channel));
+        assertTrue(router.approve(command, arguments(
+                "{ \"working_directory\": \"src\", \"command\": \"echo Exact\" }")),
+                "canonical JSON key order should still match");
+        assertEquals(1, channel.approvals.get());
+
+        assertTrue(approveWithShell(router, command, arguments(
+                "{\"command\":\"echo Exact && echo changed\",\"working_directory\":\"src\"}"), channel),
+                "a changed command suffix should prompt even when preview text is unchanged");
+        assertTrue(approveWithShell(router, command, arguments(
+                "{\"command\":\"echo Exact\",\"working_directory\":\"test\"}"), channel),
+                "a changed working directory should prompt even when preview text is unchanged");
+        assertEquals(3, channel.approvals.get());
+        assertEquals(3, router.grantCount());
+    }
+
+    @Test
+    void interactivePreviewEscapesTerminalControlsBeforeDisplay() throws Exception {
+        Tool unsafePreview = new FixedTool("dangerous", "run\u001b[2J\nnext");
+        ApprovalRouter router = new ApprovalRouter((asked, arguments) -> false);
+        RecordingChannel channel = new RecordingChannel("no");
+        router.attach(channel);
+        AtomicBoolean result = new AtomicBoolean(true);
+        Thread worker = new Thread(() -> result.set(router.approve(unsafePreview, toolArguments())));
+        worker.start();
+        ApprovalRouter.Request request = awaitRequest(router);
+        assertTrue(request.preview.contains("\\u{1b}[2J next"), request.preview);
+        assertFalse(request.preview.contains("\u001b"), "escape bytes cannot alter the terminal display");
+        request.complete("no");
+        worker.join(5000);
+        assertFalse(result.get());
+    }
+
+    @Test
     void noAndCancelledRepliesDenyWithoutGranting() throws Exception {
         ApprovalRouter router = new ApprovalRouter((asked, arguments) -> false);
         RecordingChannel channel = new RecordingChannel("no");
@@ -125,6 +166,22 @@ class ApprovalRouterTest {
 
     private JsonNode toolArguments() {
         return new ObjectMapper().createObjectNode();
+    }
+
+    private JsonNode arguments(String raw) throws Exception {
+        return new ObjectMapper().readTree(raw);
+    }
+
+    private static boolean approveWithShell(ApprovalRouter router, Tool asked, JsonNode args,
+                                            RecordingChannel channel) throws Exception {
+        AtomicBoolean result = new AtomicBoolean();
+        Thread worker = new Thread(() -> result.set(router.approve(asked, args)));
+        worker.start();
+        ApprovalRouter.Request request = awaitRequest(router);
+        request.complete(channel.serveApproval(request.tool, request.preview));
+        worker.join(5000);
+        assertFalse(worker.isAlive(), "approval worker should finish after the shell reply");
+        return result.get();
     }
 
     /** Channel stub that answers immediately, counting approval renders. */

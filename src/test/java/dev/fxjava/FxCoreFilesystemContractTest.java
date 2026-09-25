@@ -58,14 +58,21 @@ class FxCoreFilesystemContractTest {
     }
 
     @Test
-    void readFilePortsEmptyFileAndByteLimit() throws Exception {
+    void readFilePortsEmptyFileAndPaginatesPastFormerByteLimit() throws Exception {
         Files.writeString(workspace.resolve("empty.txt"), "");
         assertEquals("<path>empty.txt</path>\n<content>\n</content>",
                 named("read_file").execute(args("path", "empty.txt")));
 
-        Files.write(workspace.resolve("large.txt"), new byte[50 * 1024 + 1]);
-        assertThrows(IOException.class,
-                () -> named("read_file").execute(args("path", "large.txt")));
+        Files.writeString(workspace.resolve("large.txt"), "λ page\n".repeat(8_000));
+        String page = named("read_file").execute(args(
+                "path", "large.txt", "start_line", 7_999, "line_count", 1));
+        assertTrue(page.contains("7999\tλ page"), page);
+        assertTrue(page.contains("showing 1 of 8000 lines"), page);
+
+        Files.writeString(workspace.resolve("wide.txt"), "λ".repeat(40_000));
+        String wide = named("read_file").execute(args("path", "wide.txt", "line_count", 1));
+        assertTrue(wide.contains("line clipped after"), wide);
+        assertTrue(wide.length() < 60_000, "returned text remains bounded");
     }
 
     @Test
@@ -92,6 +99,16 @@ class FxCoreFilesystemContractTest {
         assertEquals("[grep] count 2 matching lines in 1 files for needle\n",
                 grep.execute(args("pattern", "needle", "path", "src", "include", "*.java",
                         "case_insensitive", true, "mode", "count")));
+    }
+
+    @Test
+    void grepFilesWithMatchesAppliesOffsetOnlyOnce() throws Exception {
+        Files.writeString(workspace.resolve("first.txt"), "needle\n");
+        Files.writeString(workspace.resolve("second.txt"), "needle\n");
+        String result = named("grep_files").execute(args("pattern", "needle",
+                "mode", "files_with_matches", "head_limit", 1, "offset", 1));
+        assertTrue(result.contains("[grep] 1 files with matches for needle (showing 2-2 of 2)"), result);
+        assertTrue(result.contains(path("first.txt")) ^ result.contains(path("second.txt")), result);
     }
 
     @Test

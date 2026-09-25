@@ -80,7 +80,9 @@ public final class Main {
 
         PermissionMode permissionMode = options.permissionMode != null ? options.permissionMode
                 : PermissionMode.parse(firstNonBlank(environment.get("JAVA_AGENT_PERMISSION_MODE"), "ask"));
-        AgentConfig config = new AgentConfig(apiKey, baseUrl, model, workspace, options.maxSteps, permissionMode);
+        ContextBudget contextBudget = contextBudget(environment);
+        AgentConfig config = new AgentConfig(apiKey, baseUrl, model, workspace, options.maxSteps, permissionMode,
+                contextBudget.requestTokenBudget(), contextBudget.triggerPercent(), contextBudget.imageTokenReserve());
         if (options.yoloWarning) error.println("YOLO enabled: permissions disabled");
         ObjectMapper json = new ObjectMapper();
         BufferedReader input = new BufferedReader(new InputStreamReader(standardInput));
@@ -112,7 +114,7 @@ public final class Main {
                         config.workspace(), config.maxSteps(), sessionRoot, childTools,
                         approval.childAuthority(authorityRules(child, activeSession.get(), store)),
                         error, child,
-                        subagentRuntime.get().parentContext(child.id())),
+                        subagentRuntime.get().parentContext(child.id()), config.contextBudget()),
                 permissionMode, options.noSave ? null : sessionRoot,
                 () -> activeSession.get() == null ? null : activeSession.get().id())) {
         subagentRuntime.set(subagents);
@@ -120,7 +122,7 @@ public final class Main {
         childTools.set(List.copyOf(agentTools));
         Agent agent = new Agent(json, new OpenAiResponsesClient(json, config),
                 agentTools, approval, error, config.maxSteps(), systemPrompt, resultStore,
-                subagents.parentContext("root"));
+                subagents.parentContext("root"), config.contextBudget());
         SessionRuntime session = SessionRuntime.start(agent, store, config.workspace(), config.model(),
                 systemPrompt, options.resume);
         approval.bindRules(session::rules, config.approveAll());
@@ -239,9 +241,11 @@ public final class Main {
                 ? Path.of(System.getProperty("user.home"), ".java-agent") : Path.of(configuredRoot);
         Path mcpConfig = options.mcpConfig == null ? sessionRoot.resolve("mcp.json") : Path.of(options.mcpConfig);
         ObjectMapper json = new ObjectMapper();
+        ContextBudget contextBudget = contextBudget(environment);
         AcpAgentBackend backend = new AcpAgentBackend(json, apiKey, baseUrl, model, workspace,
                 options.maxSteps, ceiling, sessionRoot, mcpConfig,
-                options.webSearch || Boolean.parseBoolean(environment.getOrDefault("JAVA_AGENT_WEB_SEARCH", "false")));
+                options.webSearch || Boolean.parseBoolean(environment.getOrDefault("JAVA_AGENT_WEB_SEARCH", "false")),
+                contextBudget);
         new AcpServer(json, backend).serve(input, out);
         return 0;
     }
@@ -454,6 +458,32 @@ public final class Main {
             if (value != null && !value.isBlank()) return value;
         }
         return null;
+    }
+
+    private static ContextBudget contextBudget(Map<String, String> environment) {
+        return new ContextBudget(
+                integerSetting(environment, "JAVA_AGENT_CONTEXT_BUDGET_TOKENS",
+                        ContextBudget.DEFAULT_REQUEST_TOKEN_BUDGET, 1, 10_000_000),
+                integerSetting(environment, "JAVA_AGENT_CONTEXT_TRIGGER_PERCENT",
+                        ContextBudget.DEFAULT_TRIGGER_PERCENT, 1, 100),
+                integerSetting(environment, "JAVA_AGENT_IMAGE_TOKEN_RESERVE",
+                        ContextBudget.DEFAULT_IMAGE_TOKEN_RESERVE, 0, 10_000_000));
+    }
+
+    private static int integerSetting(Map<String, String> environment, String name,
+                                      int fallback, int minimum, int maximum) {
+        String value = environment.get(name);
+        if (value == null || value.isBlank()) return fallback;
+        final int parsed;
+        try {
+            parsed = Integer.parseInt(value.trim());
+        } catch (NumberFormatException invalid) {
+            throw new IllegalArgumentException(name + " must be an integer between " + minimum + " and " + maximum);
+        }
+        if (parsed < minimum || parsed > maximum) {
+            throw new IllegalArgumentException(name + " must be an integer between " + minimum + " and " + maximum);
+        }
+        return parsed;
     }
 
     private static String safeMessage(Exception error) {

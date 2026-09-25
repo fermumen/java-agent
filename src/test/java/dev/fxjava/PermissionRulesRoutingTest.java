@@ -85,7 +85,7 @@ class PermissionRulesRoutingTest {
         rules.remember(SessionRules.Kind.ALLOW, "other_tool", "{}");
         router.bindRules(() -> rules, false);
 
-        grants.grant("write_file", ApprovalPrompt.flatten(tool.preview(toolArguments())));
+        grants.grant("write_file", smokeKey());
         assertTrue(router.approve(tool, toolArguments()),
             "the non-persistent always grant still satisfies unmatched requests");
     }
@@ -145,7 +145,7 @@ class PermissionRulesRoutingTest {
         SessionRules rules = new SessionRules();
         rules.remember(SessionRules.Kind.ALLOW, "write_file", smokeKey());
         rules.remember(SessionRules.Kind.DENY, "edit_file", smokeKey());
-        grants.grant("write_file", ApprovalPrompt.flatten(tool.preview(toolArguments())));
+        grants.grant("write_file", smokeKey());
         ApprovalPolicy child = parent.childAuthority(rules);
 
         Tool denied = new FixedTool("edit_file", "create smoke.txt");

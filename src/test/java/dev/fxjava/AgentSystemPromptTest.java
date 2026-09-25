@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AgentSystemPromptTest {
@@ -15,8 +16,13 @@ class AgentSystemPromptTest {
         String prompt = Agent.defaultSystemPrompt(config);
 
         assertTrue(prompt.contains("productivity.jar"));
-        assertTrue(prompt.contains("jshell --class-path"));
-        assertTrue(prompt.contains("java --class-path"));
+        assertTrue(prompt.contains("java --class-path \""));
+        assertTrue(prompt.contains(" Script.java"));
+        assertTrue(prompt.contains("Uncaught\nexceptions produce a failing process status"));
+        assertTrue(prompt.contains("after writing an artifact, reopen it and assert its"));
+        assertTrue(prompt.contains("only when the snippet explicitly reports failures"));
+        assertFalse(prompt.contains("jshell --class-path"),
+                "JShell is an optional exploration path, not the artifact validation workflow");
         assertTrue(prompt.contains("Windows"));
         assertTrue(prompt.contains("Linux"));
         assertTrue(prompt.contains("Verify that file exists"));

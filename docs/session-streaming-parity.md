@@ -31,14 +31,26 @@ observable contracts:
 - provider-token, credentialed-URL, sensitive-assignment, and structured JSON
   argument masking before model replay, previews, snapshots, and sidecar writes;
 - defensive deep copies at persistence and agent boundaries;
-- repair of a function call interrupted before its matching output;
+- a durable root-session checkpoint of each Responses result before any
+  returned tool call can run, followed by a checkpoint after each tool result;
+- repair of unanswered calls as uncertain after interruption or restart, with
+  no automatic mutation replay;
+- turn-local cumulative token accounting folded into checkpoint writes once,
+  including partial failures and automatic summarization usage;
+- estimated request-budget compaction that keeps the latest user request and
+  complete tool-call/output pairs, with configurable request, trigger, and image
+  reserve settings;
+- structured tool success/error outcomes for nonzero command exits, command
+  timeouts, MCP `isError`, and thrown tool exceptions;
+- bounded best-effort cleanup of captured command descendants and bounded
+  collection when a child keeps an inherited output pipe open;
 - streamed text deltas followed by the canonical `response.completed` object;
 - replay-safe pre-output retries for HTTP 429/500/502/503/504, with the fx
   ten-attempt budget, bounded `Retry-After`, and capped exponential pacing;
 - explicit failure for failed, incomplete, or truncated SSE streams.
 
 The relevant Java owners are `SessionStoreTest`, `AgentSessionStateTest`,
-`AgentInterruptedRecoveryTest`, `ResponsesStreamingTest`, and
+`AgentInterruptedRecoveryTest`, `RuntimeReliabilityTest`, `ResponsesStreamingTest`, and
 `MainSessionIntegrationTest`, `ToolResultStoreParityTest`,
 `AgentToolResultIntegrationTest`, `ToolResultSessionLifecycleTest`, and
 `SecretRedactorTest`; `OpenAiResponsesRetryTest` owns retry exhaustion,
@@ -69,9 +81,19 @@ enter Responses history.
 
 ## Deliberate limits
 
-This phase does not claim fx's event-log/projection migration machinery,
-Responses compaction, or background-process recovery. Those remain separate
-parity work.
+This phase does not claim fx's event-log/projection migration machinery or
+background-process recovery. Those remain separate parity work. Automatic
+context compaction uses a conservative byte-based token estimate rather than
+provider tokenization. Its defaults are a 96,000-token request budget, an 80%
+trigger, and a 4,096-token reserve per image; the values can be overridden with
+`JAVA_AGENT_CONTEXT_BUDGET_TOKENS`, `JAVA_AGENT_CONTEXT_TRIGGER_PERCENT`, and
+`JAVA_AGENT_IMAGE_TOKEN_RESERVE`.
+
+Per-tool checkpoints protect the root saved session. Subagent histories retain
+their existing turn-level persistence boundary. Captured command cleanup tracks
+descendants with Java `ProcessHandle` and uses bounded graceful and forced
+termination, but it is best effort: a detached or reparented process that was
+not observed before its parent exited may remain outside the tracked tree.
 Transport failures and streams that have started producing output are surfaced
 without automatic replay because delivery cannot be proven safe.
 The network transport is native

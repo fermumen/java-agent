@@ -1,5 +1,6 @@
 package dev.fxjava;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -34,11 +35,25 @@ class ApprovalPromptTest {
     }
 
     @Test
-    void grantKeysNormalizeWhitespaceAndCase() {
-        String key = ApprovalPrompt.grantKey("write_file", "write  smoke.txt ");
-        assertEquals(key, ApprovalPrompt.grantKey("Write_File", " write\tsmoke.txt\n"));
-        assertTrue(!key.equals(ApprovalPrompt.grantKey("read_file", "write smoke.txt")));
-        assertTrue(!key.equals(ApprovalPrompt.grantKey("write_file", "write other.txt")));
+    void grantKeysUseCanonicalArgumentsAndPreserveToolAndValueCase() throws Exception {
+        ObjectMapper json = new ObjectMapper();
+        String arguments = SessionRules.normalizeArguments(
+                json.readTree("{\"command\":\"echo A\",\"working_directory\":\"src\"}"));
+        String reordered = SessionRules.normalizeArguments(
+                json.readTree("{ \"working_directory\" : \"src\", \"command\" : \"echo A\" }"));
+        String key = ApprovalPrompt.grantKey("run_command", arguments);
+        assertEquals(key, ApprovalPrompt.grantKey("run_command", reordered),
+                "object key order and JSON formatting are insignificant");
+        assertTrue(!key.equals(ApprovalPrompt.grantKey("Run_Command", arguments)),
+                "tool name matching is case-sensitive");
+        assertTrue(!key.equals(ApprovalPrompt.grantKey("run_command",
+                SessionRules.normalizeArguments(json.readTree(
+                        "{\"command\":\"echo a\",\"working_directory\":\"src\"}")))),
+                "argument values preserve case");
+        assertTrue(!key.equals(ApprovalPrompt.grantKey("run_command",
+                SessionRules.normalizeArguments(json.readTree(
+                        "{\"command\":\"echo A\",\"working_directory\":\".\"}")))),
+                "all structured arguments participate in the identity");
     }
 
     @Test

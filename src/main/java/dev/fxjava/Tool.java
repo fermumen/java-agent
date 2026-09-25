@@ -36,6 +36,16 @@ public interface Tool {
         return result.startsWith("Error:");
     }
 
+    /**
+     * Structured internal outcome used by the agent loop. Existing tools keep
+     * their string format; tools with richer status semantics can override
+     * this without smuggling status through incidental output text.
+     */
+    default ToolResult executeResult(JsonNode arguments, String invocationId) throws Exception {
+        String output = execute(arguments, invocationId);
+        return isErrorResult(output) ? ToolResult.error(output) : ToolResult.success(output);
+    }
+
     String preview(JsonNode arguments);
 
     default String execute(JsonNode arguments, String invocationId) throws Exception {

@@ -62,8 +62,9 @@ final class ImageCommands {
         String message = failed.getMessage() == null || failed.getMessage().isBlank()
                 ? failed.getClass().getSimpleName() : failed.getMessage();
         if (failed instanceof IllegalArgumentException && message.contains("blank")) return USAGE;
-        if (message.contains("not a regular file")) return "image file not found: " + message;
-        if (message.contains("20 MiB") || message.contains("unsupported image type")) return message;
+        if (failed instanceof ImageAttachment.ImageNotFoundException) return "image file not found: " + message;
+        if (failed instanceof ImageAttachment.ImageTooLargeException
+                || failed instanceof ImageAttachment.UnsupportedImageTypeException) return message;
         return "failed to attach image: " + message;
     }
 

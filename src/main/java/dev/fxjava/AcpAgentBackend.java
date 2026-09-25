@@ -24,6 +24,7 @@ final class AcpAgentBackend implements AcpServer.Backend {
     private final PermissionMode permissionCeiling;
     private final Path sessionRoot;
     private final ToolResultStore resultStore;
+    private final ContextBudget contextBudget;
     private final McpRuntime mcp;
     private final SubagentManager subagents;
     private final List<Tool> tools;
@@ -37,6 +38,14 @@ final class AcpAgentBackend implements AcpServer.Backend {
     AcpAgentBackend(ObjectMapper json, String apiKey, String baseUrl, String defaultModel,
                     Path workspace, int maxSteps, PermissionMode permissionCeiling,
                     Path sessionRoot, Path mcpConfig, boolean webSearch) throws Exception {
+        this(json, apiKey, baseUrl, defaultModel, workspace, maxSteps, permissionCeiling,
+                sessionRoot, mcpConfig, webSearch, new ContextBudget());
+    }
+
+    AcpAgentBackend(ObjectMapper json, String apiKey, String baseUrl, String defaultModel,
+                    Path workspace, int maxSteps, PermissionMode permissionCeiling,
+                    Path sessionRoot, Path mcpConfig, boolean webSearch,
+                    ContextBudget contextBudget) throws Exception {
         this.json = json;
         this.apiKey = apiKey;
         this.baseUrl = baseUrl;
@@ -45,6 +54,7 @@ final class AcpAgentBackend implements AcpServer.Backend {
         this.maxSteps = maxSteps;
         this.permissionCeiling = permissionCeiling;
         this.sessionRoot = sessionRoot.toAbsolutePath().normalize();
+        this.contextBudget = contextBudget;
         this.model = defaultModel;
         this.resultStore = new ToolResultStore(this.sessionRoot);
         this.mcp = McpRuntime.load(json, mcpConfig);
@@ -59,7 +69,8 @@ final class AcpAgentBackend implements AcpServer.Backend {
         activeModel.set(defaultModel);
         this.subagents = new SubagentManager(json, child -> new SubagentAgentRunner(json, apiKey, baseUrl,
                 activeModel.get(), this.workspace, maxSteps, this.sessionRoot, childTools,
-                approval(effectivePermission()), quiet, child), permissionCeiling, this.sessionRoot);
+                approval(effectivePermission()), quiet, child, null, contextBudget),
+                permissionCeiling, this.sessionRoot);
         catalog.add(new SubagentTool(subagents));
         this.tools = List.copyOf(catalog);
         childTools.set(this.tools);
@@ -172,9 +183,10 @@ final class AcpAgentBackend implements AcpServer.Backend {
     }
 
     private Agent buildAgent(String selectedModel, PermissionMode permission) throws Exception {
-        AgentConfig config = new AgentConfig(apiKey, baseUrl, selectedModel, workspace, maxSteps, permission);
+        AgentConfig config = new AgentConfig(apiKey, baseUrl, selectedModel, workspace, maxSteps, permission,
+                contextBudget.requestTokenBudget(), contextBudget.triggerPercent(), contextBudget.imageTokenReserve());
         return new Agent(json, new OpenAiResponsesClient(json, config), tools, approval(permission), quiet,
-                maxSteps, systemPrompt(selectedModel, permission), resultStore);
+                maxSteps, systemPrompt(selectedModel, permission), resultStore, null, contextBudget);
     }
 
     private String systemPrompt() throws Exception {
@@ -182,7 +194,8 @@ final class AcpAgentBackend implements AcpServer.Backend {
     }
 
     private String systemPrompt(String selectedModel, PermissionMode permission) throws Exception {
-        AgentConfig config = new AgentConfig(apiKey, baseUrl, selectedModel, workspace, maxSteps, permission);
+        AgentConfig config = new AgentConfig(apiKey, baseUrl, selectedModel, workspace, maxSteps, permission,
+                contextBudget.requestTokenBudget(), contextBudget.triggerPercent(), contextBudget.imageTokenReserve());
         return Agent.defaultSystemPrompt(config) + SkillTool.catalog(workspace, sessionRoot);
     }
 

@@ -239,15 +239,33 @@
         <version>3.5.1</version>
         <executions>
           <execution>
+            <id>validate-smoke-source-java11</id>
+            <phase>verify</phase>
+            <goals><goal>exec</goal></goals>
+            <configuration>
+              <executable>${java.home}/bin/javac</executable>
+              <arguments>
+                <argument>--release</argument>
+                <argument>11</argument>
+                <argument>--class-path</argument>
+                <argument>${project.build.directory}/productivity.jar</argument>
+                <argument>-d</argument>
+                <argument>${project.build.directory}</argument>
+                <argument>${project.basedir}/ProductivitySmoke.java</argument>
+              </arguments>
+            </configuration>
+          </execution>
+          <execution>
             <id>smoke-test-shaded-bundle</id>
             <phase>verify</phase>
             <goals><goal>exec</goal></goals>
             <configuration>
-              <executable>${java.home}/bin/jshell</executable>
+              <executable>${java.home}/bin/java</executable>
               <arguments>
                 <argument>--class-path</argument>
                 <argument>${project.build.directory}/productivity.jar</argument>
-                <argument>${project.basedir}/smoke.jsh</argument>
+                <argument>${project.basedir}/ProductivitySmoke.java</argument>
+                <argument>${project.basedir}/ProductivitySmoke.java</argument>
               </arguments>
             </configuration>
           </execution>

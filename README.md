@@ -147,6 +147,24 @@ tool arguments and results are masked before durable snapshots, model replay,
 previews, and tool-result sidecars. This
 supports stateless operation and avoids relying on server-stored response IDs.
 
+Saved sessions checkpoint each completed Responses item set before running its
+tool calls, then checkpoint every tool result before starting the next call. If
+a turn stops with an unanswered call, recovery records that its outcome may be
+uncertain and never runs it again. A failed intent checkpoint prevents the tool
+from starting; a failed result checkpoint stops the remaining calls. This
+per-tool recovery boundary applies to the root saved session. Child sessions
+keep their existing turn-level persistence boundary.
+
+The agent estimates request size before each Responses request and summarizes
+older history when it reaches the configured trigger. Defaults are a 96,000
+token request budget, an 80% trigger, and a 4,096-token reserve per attached
+image. The estimate includes instructions, tool definitions, and injected child
+context; it is a conservative estimate rather than provider tokenization.
+Override the values with `JAVA_AGENT_CONTEXT_BUDGET_TOKENS`,
+`JAVA_AGENT_CONTEXT_TRIGGER_PERCENT`, and `JAVA_AGENT_IMAGE_TOKEN_RESERVE`.
+If the current user request and fixed request overhead cannot fit, the agent
+fails before issuing a summary or ordinary request.
+
 ## Safety boundary
 
 Paths are normalized and canonicalized. Workspace reads run directly; external
@@ -158,11 +176,12 @@ keep confirmation enabled and use your corporate sandbox where appropriate.
 
 ## Parity roadmap
 
-Gateway support and further ACP parity are intentionally excluded. The existing compact ACP mode remains available for compatibility. Responses compaction,
-crash-recoverable terminal sessions and full PTY/ANSI screen behavior, richer
-permission rules, MCP OAuth/fx multiplexed subscription streams, remote skill sources
-and full-screen skill management, richer subagent identity isolation, media
-tools, and the full-screen UI remain fx parity work. The implemented terminal boundary is documented in
+Gateway support and further ACP parity are intentionally excluded. The existing
+compact ACP mode remains available for compatibility. Crash-recoverable terminal
+sessions, full PTY/ANSI screen behavior, richer permission rules, MCP OAuth/fx
+multiplexed subscription streams, remote skill sources and full-screen skill
+management, richer subagent identity isolation, media tools, and the full-screen
+UI remain fx parity work. The implemented terminal boundary is documented in
 [`docs/terminal-parity.md`](docs/terminal-parity.md). The interactive
 composer, transcript, slash menu, approvals, and ask_user surfaces are covered by
 [`docs/ui-parity.md`](docs/ui-parity.md), which also lists their explicit limits; the full-screen

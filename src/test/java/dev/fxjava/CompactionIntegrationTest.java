@@ -299,8 +299,11 @@ class CompactionIntegrationTest {
             }
             assertTrue(keptStart > 0,
                     "projected summary precedes the kept exchanges, input was: " + input);
-            assertFalse(wire.toString().contains("question 0"),
-                    "turns folded into the summary stay off the wire");
+            assertTrue(projected.path("content").asText()
+                            .contains("[Original user request retained verbatim]\nquestion 0"),
+                    "the original user request remains available inside the summary projection");
+            assertFalse(wire.toString().contains("\"content\":\"question 0\""),
+                    "folded turns stay off the wire as separate history messages");
             assertToolPairsIntact(wire);
 
             SessionStore.Snapshot persisted = new SessionStore(json, state).load(sessionId);

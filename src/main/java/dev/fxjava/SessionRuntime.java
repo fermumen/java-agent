@@ -65,26 +65,16 @@ final class SessionRuntime {
 
     String prompt(String input, Consumer<String> textDelta, Agent.TurnListener turnListener)
             throws IOException, InterruptedException {
-        java.util.concurrent.atomic.AtomicLong inputTokens = new java.util.concurrent.atomic.AtomicLong();
-        java.util.concurrent.atomic.AtomicLong outputTokens = new java.util.concurrent.atomic.AtomicLong();
-        Agent.TurnListener usageListener = wrapWithUsage(turnListener, inputTokens, outputTokens);
+        TurnAccounting accounting = new TurnAccounting();
+        Agent.TurnListener usageListener = forwardEvents(turnListener);
+        Agent.HistoryCheckpoint checkpoint = (history, inputTokens, outputTokens) ->
+                checkpointTurn(accounting, history, inputTokens, outputTokens);
         // Submitting consumes staged attachments exactly once, like fx clearing
         // the draft's placeholders: a failed turn does not re-attach them.
         ObjectNode multimodal = buildMultimodalMessage(drainPendingImages(), input);
-        try {
-            String answer = multimodal == null
-                    ? agent.prompt(input, textDelta, usageListener)
-                    : agent.promptWithUserMessage(multimodal, textDelta, usageListener);
-            persist(inputTokens.getAndSet(0), outputTokens.getAndSet(0));
-            return answer;
-        } catch (IOException | InterruptedException primary) {
-            try {
-                persist(inputTokens.getAndSet(0), outputTokens.getAndSet(0));
-            } catch (IOException persistenceFailure) {
-                primary.addSuppressed(persistenceFailure);
-            }
-            throw primary;
-        }
+        return multimodal == null
+                ? agent.prompt(input, textDelta, usageListener, checkpoint)
+                : agent.promptWithUserMessage(multimodal, textDelta, usageListener, checkpoint);
     }
 
     /**
@@ -134,24 +124,36 @@ final class SessionRuntime {
      * Forwards tool events untouched and captures per-turn usage deltas so
      * they fold into the same locked snapshot write as the conversation.
      */
-    private static Agent.TurnListener wrapWithUsage(Agent.TurnListener listener,
-                                                    java.util.concurrent.atomic.AtomicLong inputTokens,
-                                                    java.util.concurrent.atomic.AtomicLong outputTokens) {
+    private static Agent.TurnListener forwardEvents(Agent.TurnListener listener) {
+        Agent.TurnListener delegate = listener == null ? Agent.TurnListener.NONE : listener;
         return new Agent.TurnListener() {
             @Override public void onToolStart(String name, String preview) {
-                listener.onToolStart(name, preview);
+                delegate.onToolStart(name, preview);
             }
 
             @Override public void onToolEnd(String name, boolean error) {
-                listener.onToolEnd(name, error);
+                delegate.onToolEnd(name, error);
             }
 
             @Override public void onUsage(long input, long output) {
-                inputTokens.addAndGet(input);
-                outputTokens.addAndGet(output);
-                listener.onUsage(input, output);
+                delegate.onUsage(input, output);
             }
         };
+    }
+
+    /** Persists a turn-local cumulative usage total only as a new delta. */
+    private synchronized void checkpointTurn(TurnAccounting accounting, ArrayNode history,
+                                             long inputTokens, long outputTokens) throws IOException {
+        long inputDelta = Math.max(0, inputTokens - accounting.persistedInputTokens);
+        long outputDelta = Math.max(0, outputTokens - accounting.persistedOutputTokens);
+        persistWith(history, inputDelta, outputDelta);
+        accounting.persistedInputTokens = Math.max(accounting.persistedInputTokens, inputTokens);
+        accounting.persistedOutputTokens = Math.max(accounting.persistedOutputTokens, outputTokens);
+    }
+
+    private static final class TurnAccounting {
+        private long persistedInputTokens;
+        private long persistedOutputTokens;
     }
 
     void setToolProgress(PrintStream progress) {
@@ -251,6 +253,18 @@ final class SessionRuntime {
      */
     Agent.SummarizeResult summarizeWithUsage(String content) throws IOException, InterruptedException {
         return agent.summarizeWithUsage(content, ConversationCompactor.SUMMARIZER_INSTRUCTIONS);
+    }
+
+    ContextBudget contextBudget() {
+        return agent.contextBudget();
+    }
+
+    long fixedRequestTokens() throws IOException {
+        return agent.fixedRequestTokens();
+    }
+
+    synchronized void recordUsageOnly(long inputTokenDelta, long outputTokenDelta) throws IOException {
+        persistWith(agent.snapshotInput(), inputTokenDelta, outputTokenDelta);
     }
 
     /** Same seam as {@link #summarizeWithUsage}, discarding the usage figures. */

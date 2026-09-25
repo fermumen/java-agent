@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.FileSystems;
@@ -13,12 +14,11 @@ import java.nio.file.Path;
 import java.nio.file.PathMatcher;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Comparator;
-import java.util.LinkedHashMap;
+import java.util.Deque;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
-import java.util.Objects;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -26,10 +26,16 @@ import java.util.stream.Stream;
 /** Compact fx-compatible implementations of the five foundational file tools. */
 final class FxCoreFileTools {
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final int MAX_READ_BYTES = 50 * 1024;
+    private static final long MAX_READ_SCAN_BYTES = 32L * 1024 * 1024;
+    private static final long MAX_GREP_FILE_BYTES = 8L * 1024 * 1024;
+    private static final long MAX_GREP_TOTAL_BYTES = 64L * 1024 * 1024;
+    private static final int MAX_LINE_CHARS = 16 * 1024;
+    private static final int MAX_READ_OUTPUT_CHARS = 50 * 1024;
+    private static final int MAX_RESULT_LINE_CHARS = 2_000;
     private static final int MAX_MUTATION_BYTES = 4 * 1024 * 1024;
     private static final int MAX_LIST_ENTRIES = 100;
     private static final int MAX_SCAN_FILES = 10_000;
+    private static final int MAX_SEARCH_VISITED_ENTRIES = 100_000;
     private static final int MAX_CONTEXT_LINES = 5;
 
     private FxCoreFileTools() {
@@ -102,33 +108,93 @@ final class FxCoreFileTools {
         if (requested.isEmpty()) throw new IllegalArgumentException("read_file field \"path\" must not be empty");
         Path file = workspace.resolveExisting(requested);
         if (!Files.isRegularFile(file)) throw new IOException("Not a regular file: " + workspace.display(file));
-        if (Files.size(file) > MAX_READ_BYTES) throw new IOException("File exceeds the 50 KiB read limit");
         int start = optionalInt(args, "start_line", 1, 1, Integer.MAX_VALUE);
         int count = optionalInt(args, "line_count", 400, 1, 2_000);
-        String text = Files.readString(file, StandardCharsets.UTF_8);
-        String[] split = text.split("\\R", -1);
-        int total = split.length;
-        if (!text.isEmpty() && endsWithLineBreak(text)) total--;
-        if (text.isEmpty()) total = 0;
-
+        long size = Files.size(file);
+        long requestedEnd = (long) start + count - 1;
         StringBuilder output = new StringBuilder("<path>").append(workspace.display(file))
                 .append("</path>\n<content>\n");
-        if (start > total && total > 0) {
-            output.append("... [start_line ").append(start).append(" is beyond end of file; total lines ")
-                    .append(total).append("]\n");
-        } else {
-            int end = Math.min(total, start - 1 + count);
-            int width = end <= 0 ? 1 : Integer.toString(end).length();
-            for (int index = start - 1; index < end; index++) {
-                output.append(String.format(Locale.ROOT, "%" + width + "d\t%s", index + 1, split[index]))
-                        .append('\n');
-            }
-            int shown = Math.max(0, end - (start - 1));
-            if (start != 1 || shown < total) {
-                output.append("... [showing ").append(shown).append(" of ").append(total)
-                        .append(" lines; use start_line/line_count to read more.]\n");
+        long linesScanned = 0;
+        List<ReadRow> outputLines = new ArrayList<>();
+        int retainedChars = 0;
+        boolean totalKnown = false;
+        boolean moreLines = false;
+        boolean responseLimited = false;
+        boolean lineClipped = false;
+        boolean scanLimited = false;
+        long nextStartLine = -1;
+        try (BoundedTextReader reader = BoundedTextReader.open(file, MAX_READ_SCAN_BYTES, MAX_LINE_CHARS)) {
+            for (;;) {
+                BoundedTextReader.Line line = reader.readLine();
+                if (line == null) {
+                    totalKnown = !reader.byteLimitReached();
+                    scanLimited = reader.byteLimitReached();
+                    break;
+                }
+                linesScanned++;
+                if (linesScanned >= start && linesScanned <= requestedEnd) {
+                    String text = line.text();
+                    if (line.truncated()) {
+                        text += "... [line clipped after " + MAX_LINE_CHARS + " characters]";
+                    }
+                    if (line.partial()) {
+                        text += "... [byte scan limit reached within this line]";
+                        scanLimited = true;
+                    }
+                    if (responseLimited) {
+                        // Keep the returned page contiguous; resume at the first omitted line.
+                    } else if (retainedChars + text.length() + 32 > MAX_READ_OUTPUT_CHARS) {
+                        responseLimited = true;
+                        nextStartLine = linesScanned;
+                    } else {
+                        outputLines.add(new ReadRow(linesScanned, text));
+                        retainedChars += text.length() + 32;
+                        if (line.truncated()) lineClipped = true;
+                    }
+                }
+                if (line.partial()) scanLimited = true;
+
+                if (size > MAX_READ_SCAN_BYTES && linesScanned >= requestedEnd) {
+                    BoundedTextReader.Line next = reader.readLine();
+                    if (next != null) {
+                        moreLines = true;
+                        if (next.partial()) scanLimited = true;
+                    } else {
+                        totalKnown = !reader.byteLimitReached();
+                        scanLimited = reader.byteLimitReached();
+                    }
+                    break;
+                }
             }
         }
+
+        long displayedEnd = totalKnown ? Math.min(linesScanned, requestedEnd) : requestedEnd;
+        int width = displayedEnd <= 0 ? 1 : Long.toString(displayedEnd).length();
+        for (ReadRow row : outputLines) {
+            output.append(String.format(Locale.ROOT, "%" + width + "d\t%s", row.number(), row.text()))
+                    .append('\n');
+        }
+        int returned = outputLines.size();
+        if (totalKnown && start > linesScanned && linesScanned > 0) {
+            output.append("... [start_line ").append(start).append(" is beyond end of file; total lines ")
+                    .append(linesScanned).append("]\n");
+        } else if (totalKnown) {
+            if (start != 1 || returned < linesScanned) {
+                output.append("... [showing ").append(returned).append(" of ").append(linesScanned)
+                        .append(" lines; use start_line/line_count to read more.]\n");
+            }
+        } else {
+            output.append("... [showing ").append(returned).append(" lines from start_line ").append(start)
+                    .append("; total line count not scanned. Use start_line/line_count to read more.]\n");
+        }
+        if (moreLines) output.append("... [more lines are available beyond the requested range.]\n");
+        if (responseLimited) {
+            output.append("... [response capped at ").append(MAX_READ_OUTPUT_CHARS)
+                    .append(" characters; resume with start_line ").append(nextStartLine).append(".]\n");
+        }
+        if (lineClipped) output.append("... [one or more long lines were clipped.]\n");
+        if (scanLimited) output.append("... [read scan stopped at ").append(MAX_READ_SCAN_BYTES)
+                .append(" bytes; more file content may be available.]\n");
         return output.append("</content>").toString();
     }
 
@@ -145,88 +211,223 @@ final class FxCoreFileTools {
         PathMatcher includeMatcher = include.isEmpty() ? null
                 : FileSystems.getDefault().getPathMatcher("glob:" + include);
 
-        List<Path> candidates;
-        try (Stream<Path> stream = Files.isRegularFile(root) ? Stream.of(root) : Files.walk(root)) {
-            candidates = stream.filter(Files::isRegularFile).filter(path -> !FxIgnoredPaths.contains(root, path))
-                    .limit(MAX_SCAN_FILES + 1L).collect(Collectors.toList());
-        }
+        WorkspaceSearchFiles.Selection selection = WorkspaceSearchFiles.under(root, MAX_SCAN_FILES,
+                MAX_SEARCH_VISITED_ENTRIES,
+                path -> FxIgnoredPaths.contains(root, path));
         List<Match> matches = new ArrayList<>();
+        List<String> matchedFiles = new ArrayList<>();
+        long totalMatches = 0;
+        long matchingFiles = 0;
+        long totalBytesRead = 0;
+        int unreadableFiles = selection.unresolvable();
+        int binaryFiles = 0;
+        int partialFiles = 0;
+        int longLineFiles = 0;
+        boolean byteBudgetReached = false;
         String needle = caseInsensitive ? pattern.toLowerCase(Locale.ROOT) : pattern;
-        for (Path file : candidates.subList(0, Math.min(candidates.size(), MAX_SCAN_FILES))) {
-            Path relative = Files.isRegularFile(root) ? file.getFileName() : root.relativize(file);
+        long selectedEnd = (long) offset + limit;
+        for (Path file : selection.files()) {
+            if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException("Search interrupted");
+            long remainingBudget = MAX_GREP_TOTAL_BYTES - totalBytesRead;
+            if (remainingBudget <= 0) {
+                byteBudgetReached = true;
+                break;
+            }
+            Path relative = root.equals(file) ? file.getFileName() : root.relativize(file);
             if (includeMatcher != null && !includeMatcher.matches(relative) && !includeMatcher.matches(file.getFileName())) {
                 continue;
             }
-            if (Files.size(file) > MAX_READ_BYTES) continue;
-            String content;
+            long fileBudget = Math.min(MAX_GREP_FILE_BYTES, remainingBudget);
+            long fileMatches = 0;
+            boolean binary = false;
+            boolean filePartial = false;
+            boolean fileHasLongLine = false;
+            Deque<String> previous = new ArrayDeque<>();
+            List<Match> fileResults = new ArrayList<>();
+            List<Match> activeContext = new ArrayList<>();
+            long lineNumber = 0;
+            boolean finalLineTerminated = false;
             try {
-                content = Files.readString(file, StandardCharsets.UTF_8);
+                BoundedTextReader reader = BoundedTextReader.open(file, fileBudget, MAX_LINE_CHARS);
+                try {
+                    try (reader) {
+                        for (BoundedTextReader.Line line; (line = reader.readLine()) != null; ) {
+                            lineNumber++;
+                            finalLineTerminated = line.terminated();
+                            String raw = line.text();
+                            if (line.containsNul()) {
+                                binary = true;
+                                break;
+                            }
+                            if (line.truncated()) fileHasLongLine = true;
+                            String displayLine = clipSearchLine(raw, line.truncated() || line.partial());
+                            for (int index = activeContext.size() - 1; index >= 0; index--) {
+                                Match match = activeContext.get(index);
+                                if (lineNumber <= match.line() + context) match.after().add(displayLine);
+                                else activeContext.remove(index);
+                            }
+                            String haystack = caseInsensitive ? raw.toLowerCase(Locale.ROOT) : raw;
+                            if (haystack.contains(needle)) {
+                                long matchIndex = totalMatches + fileMatches;
+                                if (matchIndex >= offset && matchIndex < selectedEnd) {
+                                    Match match = new Match(workspace.display(file), lineNumber, displayLine,
+                                            new ArrayList<>(previous), new ArrayList<>());
+                                    fileResults.add(match);
+                                    if (context > 0) activeContext.add(match);
+                                }
+                                fileMatches++;
+                            }
+                            if (context > 0) {
+                                previous.addLast(displayLine);
+                                while (previous.size() > context) previous.removeFirst();
+                            }
+                            if (line.partial()) {
+                                filePartial = true;
+                                break;
+                            }
+                        }
+                        if (reader.byteLimitReached()) filePartial = true;
+                    }
+                } finally {
+                    totalBytesRead += reader.bytesRead();
+                }
+            } catch (InterruptedIOException interrupted) {
+                throw interrupted;
             } catch (IOException | RuntimeException unreadable) {
+                unreadableFiles++;
                 continue;
             }
-            if (content.indexOf('\0') >= 0) continue;
-            String[] lines = content.split("\\R", -1);
-            int realLines = lines.length - (endsWithLineBreak(content) ? 1 : 0);
-            for (int index = 0; index < realLines; index++) {
-                String haystack = caseInsensitive ? lines[index].toLowerCase(Locale.ROOT) : lines[index];
-                if (haystack.contains(needle)) {
-                    matches.add(new Match(workspace.display(file), index + 1, lines[index], lines));
+            if (binary) {
+                binaryFiles++;
+                continue;
+            }
+            if (!filePartial && finalLineTerminated && context > 0) {
+                long trailingEmptyLine = lineNumber + 1;
+                for (Match match : activeContext) {
+                    if (trailingEmptyLine <= match.line() + context) match.after().add("");
                 }
             }
+            if (filePartial) partialFiles++;
+            if (fileHasLongLine) longLineFiles++;
+            if (fileMatches > 0) {
+                matchingFiles++;
+                if (mode.equals("files_with_matches") && matchingFiles - 1 >= offset
+                        && matchingFiles - 1 < selectedEnd) {
+                    matchedFiles.add(workspace.display(file));
+                }
+                matches.addAll(fileResults);
+                totalMatches += fileMatches;
+            }
+            if (totalBytesRead >= MAX_GREP_TOTAL_BYTES) {
+                byteBudgetReached = true;
+                break;
+            }
         }
+        boolean incomplete = selection.outsideRoot() > 0 || unreadableFiles > 0 || binaryFiles > 0
+                || partialFiles > 0 || longLineFiles > 0 || selection.candidateLimitReached()
+                || selection.traversalLimitReached() || byteBudgetReached;
+        String diagnostics = grepDiagnostics(selection, unreadableFiles, binaryFiles, partialFiles,
+                longLineFiles, byteBudgetReached);
         if (mode.equals("count")) {
-            long files = matches.stream().map(Match::path).distinct().count();
-            return "[grep] count " + matches.size() + " matching lines in " + files + " files for " + pattern + "\n";
+            return "[grep] count " + totalMatches + " matching lines in " + matchingFiles
+                    + " files for " + pattern + diagnostics + "\n";
         }
-        if (mode.equals("files_with_matches")) return formatMatchingFiles(pattern, matches, offset, limit);
-        return formatMatches(pattern, matches, offset, limit, context);
+        if (mode.equals("files_with_matches")) {
+            return formatMatchingFiles(pattern, matchedFiles, matchingFiles, offset, limit, diagnostics, incomplete);
+        }
+        return formatMatches(pattern, matches, totalMatches, offset, limit, context, diagnostics, incomplete);
     }
 
-    private static String formatMatchingFiles(String pattern, List<Match> matches, int offset, int limit) {
-        List<String> files = new ArrayList<>(matches.stream().map(Match::path)
-                .collect(java.util.stream.Collectors.toCollection(java.util.LinkedHashSet::new)));
-        int start = Math.min(offset, files.size());
-        int end = Math.min(start + limit, files.size());
-        if (files.isEmpty()) return "[grep] no files with matches for " + pattern + "\n";
+    private static String formatMatchingFiles(String pattern, List<String> files, long totalFiles,
+                                              int offset, int limit, String diagnostics, boolean incomplete) {
+        // The caller collects only the file page selected by offset/limit while scanning.
+        int start = 0;
+        int end = Math.min(limit, files.size());
+        if (totalFiles == 0) return "[grep] no files with matches for " + pattern + diagnostics + "\n";
         if (start == end) return "[grep] no files with matches for " + pattern + " at offset " + offset
-                + " (" + files.size() + " total files)\n";
-        String header = start == 0 && end == files.size()
+                + " (" + totalFiles + " total files)" + diagnostics + "\n";
+        String header = !incomplete && start == 0 && end == totalFiles
                 ? "[grep] " + (end - start) + " files with matches for " + pattern + "\n"
                 : "[grep] " + (end - start) + " files with matches for " + pattern + " (showing "
-                + (start + 1) + "-" + end + " of " + files.size() + ")\n";
+                + (offset + 1) + "-" + (offset + end - start) + " of " + totalFiles + ")"
+                + diagnostics + "\n";
         StringBuilder output = new StringBuilder(header);
         files.subList(start, end).forEach(file -> output.append(" - ").append(file).append('\n'));
-        if (end < files.size()) output.append("... more files available; use offset ").append(end).append(" to continue\n");
+        if (offset + (end - start) < totalFiles) {
+            output.append("... more files available; use offset ").append(offset + (end - start)).append(" to continue\n");
+        }
         return output.toString();
     }
 
-    private static String formatMatches(String pattern, List<Match> matches, int offset, int limit, int context) {
-        int start = Math.min(offset, matches.size());
-        int end = Math.min(start + limit, matches.size());
-        if (matches.isEmpty()) return "[grep] no matches for " + pattern + "\n";
-        if (start == end) return "[grep] no matches for " + pattern + " at offset " + offset
-                + " (" + matches.size() + " total matches)\n";
-        String header = start == 0 && end == matches.size()
+    private static String formatMatches(String pattern, List<Match> matches, long totalMatches,
+                                        int offset, int limit, int context, String diagnostics,
+                                        boolean incomplete) {
+        int start = 0;
+        int end = matches.size();
+        if (totalMatches == 0) return "[grep] no matches for " + pattern + diagnostics + "\n";
+        if (matches.isEmpty()) return "[grep] no matches for " + pattern + " at offset " + offset
+                + " (" + totalMatches + " total matches)" + diagnostics + "\n";
+        String header = !incomplete && offset == 0 && end == totalMatches
                 ? "[grep] " + (end - start) + " matches for " + pattern + "\n"
                 : "[grep] " + (end - start) + " matches for " + pattern + " (showing "
-                + (start + 1) + "-" + end + " of " + matches.size() + ")\n";
+                + (offset + 1) + "-" + (offset + end) + " of " + totalMatches + ")"
+                + diagnostics + "\n";
         StringBuilder output = new StringBuilder(header);
         for (Match match : matches.subList(start, end)) {
-            int first = Math.max(1, match.line() - context);
-            int last = Math.min(match.lines().length, match.line() + context);
-            for (int line = first; line < match.line(); line++) {
-                output.append("   ").append(match.path()).append(':').append(line).append("- ")
-                        .append(clip(match.lines()[line - 1])).append('\n');
+            long first = match.line() - match.before().size();
+            for (int index = 0; index < match.before().size(); index++) {
+                output.append("   ").append(match.path()).append(':').append(first + index).append("- ")
+                        .append(match.before().get(index)).append('\n');
             }
             output.append(" - ").append(match.path()).append(':').append(match.line()).append(": ")
-                    .append(clip(match.text())).append('\n');
-            for (int line = match.line() + 1; line <= last; line++) {
-                output.append("   ").append(match.path()).append(':').append(line).append("- ")
-                        .append(clip(match.lines()[line - 1])).append('\n');
+                    .append(match.text()).append('\n');
+            for (int index = 0; index < match.after().size(); index++) {
+                output.append("   ").append(match.path()).append(':').append(match.line() + index + 1).append("- ")
+                        .append(match.after().get(index)).append('\n');
             }
         }
-        if (end < matches.size()) output.append("... more matches available; use offset ").append(end).append(" to continue\n");
+        if (offset + end < totalMatches) {
+            output.append("... more matches available; use offset ").append(offset + end).append(" to continue\n");
+        }
         return output.toString();
+    }
+
+    private static String grepDiagnostics(WorkspaceSearchFiles.Selection selection, int unreadable,
+                                         int binary, int partial, int longLines, boolean byteBudgetReached) {
+        List<String> details = new ArrayList<>();
+        if (selection.outsideRoot() > 0) details.add(selection.outsideRoot() + " candidate(s) outside the selected search root skipped");
+        if (unreadable > 0) {
+            details.add(unreadable + " unreadable or unresolved file(s) skipped");
+        }
+        if (binary > 0) details.add(binary + " binary file(s) skipped");
+        if (partial > 0) details.add(partial + " file(s) scanned only through a byte limit");
+        if (longLines > 0) details.add(longLines + " file(s) contained lines longer than " + MAX_LINE_CHARS
+                + " characters; omitted line suffixes may contain matches");
+        if (selection.candidateLimitReached()) details.add("candidate scan stopped at " + MAX_SCAN_FILES + " files");
+        if (selection.traversalLimitReached()) details.add("directory traversal stopped at "
+                + MAX_SEARCH_VISITED_ENTRIES + " entries");
+        if (byteBudgetReached) details.add("total text scan stopped at " + MAX_GREP_TOTAL_BYTES + " bytes");
+        return details.isEmpty() ? "" : " [search incomplete: " + String.join("; ", details) + "]";
+    }
+
+    private static String clipSearchLine(String line, boolean sourceTruncated) {
+        if (line.length() <= MAX_RESULT_LINE_CHARS && !sourceTruncated) return line;
+        int end = Math.min(line.length(), MAX_RESULT_LINE_CHARS);
+        if (end > 0 && end < line.length() && Character.isHighSurrogate(line.charAt(end - 1))) end--;
+        return line.substring(0, end) + "... [line clipped]";
+    }
+
+    private static final class ReadRow {
+        private final long number;
+        private final String text;
+
+        ReadRow(long number, String text) {
+            this.number = number;
+            this.text = text;
+        }
+
+        long number() { return number; }
+        String text() { return text; }
     }
 
     private static String writeFile(WorkspaceTools.Workspace workspace, JsonNode args) throws IOException {
@@ -351,53 +552,26 @@ final class FxCoreFileTools {
         return number;
     }
 
-    private static boolean endsWithLineBreak(String text) {
-        return text.endsWith("\n") || text.endsWith("\r");
-    }
-
-    private static String clip(String line) {
-        return line.length() <= 2_000 ? line : line.substring(0, 2_000) + "...";
-    }
-
     private static final class Match {
         private final String path;
-        private final int line;
+        private final long line;
         private final String text;
-        private final String[] lines;
+        private final List<String> before;
+        private final List<String> after;
 
-        Match(String path, int line, String text, String[] lines) {
+        Match(String path, long line, String text, List<String> before, List<String> after) {
             this.path = path;
             this.line = line;
             this.text = text;
-            this.lines = lines;
+            this.before = before;
+            this.after = after;
         }
 
         public String path() { return path; }
-        public int line() { return line; }
+        public long line() { return line; }
         public String text() { return text; }
-        public String[] lines() { return lines; }
-
-        @Override
-        public boolean equals(Object other) {
-            if (this == other) return true;
-            if (!(other instanceof Match)) return false;
-            Match that = (Match) other;
-            return line == that.line && Objects.equals(path, that.path)
-                    && Objects.equals(text, that.text) && Objects.equals(lines, that.lines);
-        }
-
-        @Override
-        public int hashCode() {
-            int result = Objects.hashCode(path);
-            result = 31 * result + Integer.hashCode(line);
-            result = 31 * result + Objects.hashCode(text);
-            return 31 * result + Objects.hashCode(lines);
-        }
-
-        @Override
-        public String toString() {
-            return "Match[path=" + path + ", line=" + line + ", text=" + text + ", lines=" + lines + "]";
-        }
+        public List<String> before() { return before; }
+        public List<String> after() { return after; }
     }
 
     @FunctionalInterface
