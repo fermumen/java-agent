@@ -78,8 +78,9 @@ java-agent.jar
 productivity.jar
 ```
 
-The agent's system prompt supplies that absolute path and directs productivity
-work through JShell. Override the location with
+The agent's system prompt supplies that absolute path and directs artifact
+creation through reusable Java source-file programs, with JShell available for
+exploration. Override the location with
 `JAVA_AGENT_PRODUCTIVITY_JAR` when the files cannot be colocated. For example:
 
 ```sh
@@ -93,6 +94,22 @@ selected TwelveMonkeys ImageIO plugins, XZ, and XChart. It intentionally omits
 native/JNI dependencies and Tika's full parser package.
 
 ## Configure and run
+
+On Windows, build with Maven and run `java-agent.cmd` from the checkout, or
+optionally install a per-user `java-agent` command:
+
+```powershell
+mvn package
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-user-path.ps1
+```
+
+The installer copies the launcher and jar to `%LOCALAPPDATA%\java-agent\bin`
+and adds that directory to your user PATH. Open a new terminal afterward.
+The `.cmd` launcher uses PowerShell's process-only execution-policy bypass; it
+does not change a saved policy. Enforced Group Policy or AppLocker rules can
+still block execution. The command keeps the calling directory as the
+workspace, so `java-agent ask "Inspect this folder"` works from any directory;
+use `--workspace` to select another one.
 
 ```sh
 export OPENAI_API_KEY="..."
