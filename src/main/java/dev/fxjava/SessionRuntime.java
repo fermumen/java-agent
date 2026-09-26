@@ -51,8 +51,18 @@ final class SessionRuntime {
             }
         }
         SessionRules rules = snapshot.rules();
-        if (resume != null) agent.restoreConversation(snapshot.input(), snapshot.instructions());
+        if (resume != null) {
+            agent.restoreConversation(snapshot.input(), snapshot.instructions());
+            restoreSavedModel(agent, snapshot);
+        }
         return new SessionRuntime(agent, store, snapshot, rules);
+    }
+
+    private static void restoreSavedModel(Agent agent, SessionStore.Snapshot saved) {
+        ModelSelection current = agent.modelSelection();
+        if (current != null && !current.model().equals(saved.model())) {
+            agent.setModelSelection(current.withModel(saved.model()));
+        }
     }
 
     String prompt(String input) throws IOException, InterruptedException {
@@ -174,8 +184,39 @@ final class SessionRuntime {
         return snapshot == null ? null : snapshot.id();
     }
 
-    String model() {
-        return snapshot == null ? null : snapshot.model();
+    synchronized ModelSelection modelSelection() {
+        ModelSelection active = agent.modelSelection();
+        if (active != null) return active;
+        return snapshot == null ? null : new ModelSelection(snapshot.model(), null);
+    }
+
+    synchronized String model() {
+        ModelSelection active = modelSelection();
+        return active == null ? null : active.model();
+    }
+
+    synchronized String reasoningEffort() {
+        ModelSelection active = modelSelection();
+        return active == null ? null : active.reasoningEffort();
+    }
+
+    synchronized void setModel(String model) {
+        ModelSelection current = modelSelection();
+        if (current == null) throw new IllegalStateException("The active response client does not expose model selection");
+        setModelSelection(current.withModel(model));
+    }
+
+    synchronized void setReasoningEffort(String effort) {
+        ModelSelection current = modelSelection();
+        if (current == null) throw new IllegalStateException("The active response client does not expose model selection");
+        setModelSelection(current.withReasoningEffort(effort));
+    }
+
+    synchronized void setModelSelection(ModelSelection replacement) {
+        if (replacement == null) throw new IllegalArgumentException("model selection is required");
+        ModelSelection current = modelSelection();
+        if (replacement.equals(current)) return;
+        agent.setModelSelection(replacement);
     }
 
     boolean persistent() {
@@ -287,7 +328,9 @@ final class SessionRuntime {
 
     synchronized void newSession(Path workspace, String model, String instructions) throws IOException {
         requirePersistence();
-        SessionStore.Snapshot created = store.create(workspace, model, instructions);
+        ModelSelection selection = agent.modelSelection();
+        String selectedModel = selection == null ? model : selection.model();
+        SessionStore.Snapshot created = store.create(workspace, selectedModel, instructions);
         SessionRules createdRules = created.rules();
         agent.clearConversation(instructions);
         pendingImages.clear();
@@ -304,6 +347,7 @@ final class SessionRuntime {
         SessionRules loadedRules = loaded.rules();
         SessionUsage loadedUsage = loaded.usage();
         agent.restoreConversation(loaded.input(), loaded.instructions());
+        restoreSavedModel(agent, loaded);
         pendingImages.clear();
         snapshot = loaded;
         rules = loadedRules;
@@ -319,6 +363,7 @@ final class SessionRuntime {
         SessionRules recoveredRules = recovered.rules();
         SessionUsage recoveredUsage = recovered.usage();
         agent.restoreConversation(recovered.input(), recovered.instructions());
+        restoreSavedModel(agent, recovered);
         pendingImages.clear();
         snapshot = recovered;
         rules = recoveredRules;
@@ -360,8 +405,10 @@ final class SessionRuntime {
 
     private void persistWith(ArrayNode input, long inputTokenDelta, long outputTokenDelta) throws IOException {
         if (store != null) {
+            ModelSelection active = agent.modelSelection();
+            String model = active == null ? snapshot.model() : active.model();
             snapshot = store.update(snapshot, input, agent.instructions(),
-                    inputTokenDelta, outputTokenDelta);
+                    inputTokenDelta, outputTokenDelta, model);
             rules = snapshot.rules();
             usage = snapshot.usage();
             return;

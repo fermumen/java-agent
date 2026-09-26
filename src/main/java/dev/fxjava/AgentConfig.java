@@ -7,6 +7,7 @@ public final class AgentConfig {
     private final String apiKey;
     private final String baseUrl;
     private final String model;
+    private final String reasoningEffort;
     private final Path workspace;
     private final int maxSteps;
     private final PermissionMode permissionMode;
@@ -18,21 +19,34 @@ public final class AgentConfig {
                        int maxSteps, PermissionMode permissionMode) {
         this(apiKey, baseUrl, model, workspace, maxSteps, permissionMode,
                 ContextBudget.DEFAULT_REQUEST_TOKEN_BUDGET, ContextBudget.DEFAULT_TRIGGER_PERCENT,
-                ContextBudget.DEFAULT_IMAGE_TOKEN_RESERVE);
+                ContextBudget.DEFAULT_IMAGE_TOKEN_RESERVE, null);
+    }
+
+    public AgentConfig(String apiKey, String baseUrl, String model, Path workspace,
+                       int maxSteps, PermissionMode permissionMode, String reasoningEffort) {
+        this(apiKey, baseUrl, model, workspace, maxSteps, permissionMode,
+                ContextBudget.DEFAULT_REQUEST_TOKEN_BUDGET, ContextBudget.DEFAULT_TRIGGER_PERCENT,
+                ContextBudget.DEFAULT_IMAGE_TOKEN_RESERVE, reasoningEffort);
     }
 
     public AgentConfig(String apiKey, String baseUrl, String model, Path workspace,
                        int maxSteps, PermissionMode permissionMode,
                        int contextTokenBudget, int contextTriggerPercent, int imageTokenReserve) {
+        this(apiKey, baseUrl, model, workspace, maxSteps, permissionMode,
+                contextTokenBudget, contextTriggerPercent, imageTokenReserve, null);
+    }
+
+    public AgentConfig(String apiKey, String baseUrl, String model, Path workspace,
+                       int maxSteps, PermissionMode permissionMode,
+                       int contextTokenBudget, int contextTriggerPercent, int imageTokenReserve,
+                       String reasoningEffort) {
         if (apiKey == null || apiKey.isBlank()) {
             throw new IllegalArgumentException("An API key is required");
         }
         if (baseUrl == null || baseUrl.isBlank()) {
             throw new IllegalArgumentException("A base URL is required");
         }
-        if (model == null || model.isBlank()) {
-            throw new IllegalArgumentException("A model is required");
-        }
+        ModelSelection selection = new ModelSelection(model, reasoningEffort);
         workspace = workspace.toAbsolutePath().normalize();
         if (maxSteps < 1 || maxSteps > 100) {
             throw new IllegalArgumentException("maxSteps must be between 1 and 100");
@@ -41,7 +55,8 @@ public final class AgentConfig {
         ContextBudget contextBudget = new ContextBudget(contextTokenBudget, contextTriggerPercent, imageTokenReserve);
         this.apiKey = apiKey;
         this.baseUrl = baseUrl;
-        this.model = model;
+        this.model = selection.model();
+        this.reasoningEffort = selection.reasoningEffort();
         this.workspace = workspace;
         this.maxSteps = maxSteps;
         this.permissionMode = permissionMode;
@@ -53,6 +68,8 @@ public final class AgentConfig {
     public String apiKey() { return apiKey; }
     public String baseUrl() { return baseUrl; }
     public String model() { return model; }
+    public String reasoningEffort() { return reasoningEffort; }
+    static java.util.List<String> reasoningEffortValues() { return ModelSelection.reasoningEffortValues(); }
     public Path workspace() { return workspace; }
     public int maxSteps() { return maxSteps; }
     public PermissionMode permissionMode() { return permissionMode; }
@@ -60,6 +77,16 @@ public final class AgentConfig {
         return new ContextBudget(contextTokenBudget, contextTriggerPercent, imageTokenReserve);
     }
     public boolean approveAll() { return permissionMode == PermissionMode.YOLO; }
+
+    public AgentConfig withModel(String replacement) {
+        return new AgentConfig(apiKey, baseUrl, replacement, workspace, maxSteps, permissionMode,
+                contextTokenBudget, contextTriggerPercent, imageTokenReserve, reasoningEffort);
+    }
+
+    public AgentConfig withReasoningEffort(String replacement) {
+        return new AgentConfig(apiKey, baseUrl, model, workspace, maxSteps, permissionMode,
+                contextTokenBudget, contextTriggerPercent, imageTokenReserve, replacement);
+    }
 
     @Override
     public boolean equals(Object other) {
@@ -70,6 +97,7 @@ public final class AgentConfig {
                 && contextTokenBudget == that.contextTokenBudget
                 && contextTriggerPercent == that.contextTriggerPercent
                 && imageTokenReserve == that.imageTokenReserve
+                && Objects.equals(reasoningEffort, that.reasoningEffort)
                 && Objects.equals(apiKey, that.apiKey)
                 && Objects.equals(baseUrl, that.baseUrl)
                 && Objects.equals(model, that.model)
@@ -82,6 +110,7 @@ public final class AgentConfig {
         int result = Objects.hashCode(apiKey);
         result = 31 * result + Objects.hashCode(baseUrl);
         result = 31 * result + Objects.hashCode(model);
+        result = 31 * result + Objects.hashCode(reasoningEffort);
         result = 31 * result + Objects.hashCode(workspace);
         result = 31 * result + Integer.hashCode(maxSteps);
         result = 31 * result + Objects.hashCode(permissionMode);
@@ -97,7 +126,8 @@ public final class AgentConfig {
                 + ", workspace=" + workspace + ", maxSteps=" + maxSteps
                 + ", permissionMode=" + permissionMode + ", contextTokenBudget=" + contextTokenBudget
                 + ", contextTriggerPercent=" + contextTriggerPercent
-                + ", imageTokenReserve=" + imageTokenReserve + "]";
+                + ", imageTokenReserve=" + imageTokenReserve
+                + ", reasoningEffort=" + reasoningEffort + "]";
     }
 }
 

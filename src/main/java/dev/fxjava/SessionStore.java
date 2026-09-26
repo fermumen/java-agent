@@ -278,7 +278,15 @@ public final class SessionStore {
      */
     public Snapshot update(Snapshot snapshot, ArrayNode input, String instructions,
                            long inputTokenDelta, long outputTokenDelta) throws IOException {
-        Snapshot updated = new Snapshot(snapshot.id(), snapshot.workspace(), snapshot.model(), snapshot.title(),
+        return update(snapshot, input, instructions, inputTokenDelta, outputTokenDelta, snapshot.model());
+    }
+
+    Snapshot update(Snapshot snapshot, ArrayNode input, String instructions,
+                    long inputTokenDelta, long outputTokenDelta, String model) throws IOException {
+        if (model == null || model.isBlank() || model.length() > 200) {
+            throw new IllegalArgumentException("Invalid session model");
+        }
+        Snapshot updated = new Snapshot(snapshot.id(), snapshot.workspace(), model, snapshot.title(),
                 instructions, snapshot.createdAt(), clock.millis(), input, snapshot.rules());
         return updatePreservingState(updated, inputTokenDelta, outputTokenDelta);
     }

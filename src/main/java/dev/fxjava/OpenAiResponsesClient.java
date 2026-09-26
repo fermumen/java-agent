@@ -45,7 +45,7 @@ public final class OpenAiResponsesClient implements ResponsesClient {
     private final HttpClient http;
     private final URI endpoint;
     private final String apiKey;
-    private final String model;
+    private volatile ModelSelection modelSelection;
     private final Sleeper sleeper;
     private final Duration streamIdleTimeout;
     private final Duration streamOverallTimeout;
@@ -71,7 +71,7 @@ public final class OpenAiResponsesClient implements ResponsesClient {
         this.http = http;
         this.endpoint = responsesEndpoint(config.baseUrl());
         this.apiKey = config.apiKey();
-        this.model = config.model();
+        this.modelSelection = new ModelSelection(config.model(), config.reasoningEffort());
         this.sleeper = sleeper;
         this.streamIdleTimeout = positive(streamIdleTimeout, "streamIdleTimeout");
         this.streamOverallTimeout = positive(streamOverallTimeout, "streamOverallTimeout");
@@ -182,7 +182,11 @@ public final class OpenAiResponsesClient implements ResponsesClient {
 
     private ObjectNode requestBody(ArrayNode input, ArrayNode tools, String instructions, boolean stream) {
         ObjectNode body = json.createObjectNode();
-        body.put("model", model);
+        ModelSelection selected = modelSelection;
+        body.put("model", selected.model());
+        if (selected.reasoningEffort() != null) {
+            body.putObject("reasoning").put("effort", selected.reasoningEffort());
+        }
         body.put("instructions", instructions);
         body.set("input", input);
         body.set("tools", tools);
@@ -191,6 +195,12 @@ public final class OpenAiResponsesClient implements ResponsesClient {
         body.put("stream", stream);
         body.putArray("include").add("reasoning.encrypted_content");
         return body;
+    }
+
+    ModelSelection modelSelection() { return modelSelection; }
+
+    void setModelSelection(ModelSelection replacement) {
+        modelSelection = java.util.Objects.requireNonNull(replacement, "replacement");
     }
 
     private HttpRequest request(ObjectNode body, String accept) throws IOException {

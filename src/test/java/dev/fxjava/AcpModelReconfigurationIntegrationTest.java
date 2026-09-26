@@ -67,9 +67,43 @@ class AcpModelReconfigurationIntegrationTest {
         assertTrue(requests.get(2).path("instructions").asText().contains("Permission mode: auto"));
     }
 
+    @Test
+    void configuredEffortIsSentAndSurvivesAcpModelChanges() throws Exception {
+        Path workspace = Files.createDirectory(temporary.resolve("effort-workspace"));
+        Path state = temporary.resolve("effort-state");
+        List<JsonNode> requests = new ArrayList<>();
+        AtomicInteger sequence = new AtomicInteger();
+        HttpServer api = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        api.createContext("/v1/responses", exchange -> respond(exchange, requests, sequence));
+        api.start();
+        String endpoint = "http://127.0.0.1:" + api.getAddress().getPort() + "/v1";
+        try {
+            try (AcpAgentBackend backend = backend(workspace, state, endpoint, "high")) {
+                backend.initialize();
+                backend.newSession(List.of());
+                backend.prompt("first", ignored -> { });
+                backend.setModel("model-2");
+                backend.prompt("second", ignored -> { });
+            }
+        } finally {
+            api.stop(0);
+        }
+
+        assertEquals(2, requests.size());
+        assertEquals("model-1", requests.get(0).path("model").asText());
+        assertEquals("high", requests.get(0).path("reasoning").path("effort").asText());
+        assertEquals("model-2", requests.get(1).path("model").asText());
+        assertEquals("high", requests.get(1).path("reasoning").path("effort").asText());
+    }
+
     private AcpAgentBackend backend(Path workspace, Path state, String endpoint) throws Exception {
         return new AcpAgentBackend(json, "test-key", endpoint, "model-1", workspace, 20,
                 PermissionMode.AUTO, state, state.resolve("mcp.json"), false);
+    }
+
+    private AcpAgentBackend backend(Path workspace, Path state, String endpoint, String effort) throws Exception {
+        return new AcpAgentBackend(json, "test-key", endpoint, "model-1", workspace, 20,
+                PermissionMode.AUTO, state, state.resolve("mcp.json"), false, new ContextBudget(), effort);
     }
 
     private void respond(HttpExchange exchange, List<JsonNode> requests, AtomicInteger sequence) {

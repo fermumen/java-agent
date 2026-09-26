@@ -38,7 +38,8 @@ final class InteractiveShell implements QuestionFlow {
     private final PrintStream error;
     private final Ansi ansi;
     private final ApprovalRouter approvalRouter;
-    private final String modelSource;
+    private String modelSource;
+    private String effortSource = "default";
     private final Spinner.Clock clock;
 
     private final Composer composer = new Composer();
@@ -65,6 +66,15 @@ final class InteractiveShell implements QuestionFlow {
                      McpRuntime mcp, Path sessionRoot, InputStream input,
                      PrintStream out, PrintStream error, Ansi ansi,
                      ApprovalRouter approvalRouter, String modelSource, Spinner.Clock clock) {
+        this(session, config, systemPrompt, mcp, sessionRoot, input, out, error, ansi,
+                approvalRouter, modelSource, "default", clock);
+    }
+
+    InteractiveShell(SessionRuntime session, AgentConfig config, String systemPrompt,
+                     McpRuntime mcp, Path sessionRoot, InputStream input,
+                     PrintStream out, PrintStream error, Ansi ansi,
+                     ApprovalRouter approvalRouter, String modelSource, String effortSource,
+                     Spinner.Clock clock) {
         this.session = session;
         this.config = config;
         this.systemPrompt = systemPrompt;
@@ -76,6 +86,7 @@ final class InteractiveShell implements QuestionFlow {
         this.ansi = ansi;
         this.approvalRouter = approvalRouter;
         this.modelSource = modelSource;
+        this.effortSource = effortSource;
         this.clock = clock;
         this.sizeGate = new RefreshGate(clock, SIZE_REFRESH_INTERVAL_NANOS);
     }
@@ -351,16 +362,25 @@ final class InteractiveShell implements QuestionFlow {
                 break;
             case "/resume": {
                 String id = argumentAfter(line, "/resume");
+                String selectedModel = session.model();
+                boolean keepConfiguredModel = modelSourceWinsOverSession(modelSource);
                 session.resume(id.isEmpty() ? "last" : id, config.workspace());
+                if (keepConfiguredModel) session.setModel(selectedModel);
+                else modelSource = "saved session";
                 approvalRouter.clearSessionGrants();
                 out.println("Resumed session: " + session.id());
                 break;
             }
-            case "/recover":
+            case "/recover": {
+                String selectedModel = session.model();
+                boolean keepConfiguredModel = modelSourceWinsOverSession(modelSource);
                 session.recover(argumentAfter(line, "/recover"), config.workspace());
+                if (keepConfiguredModel) session.setModel(selectedModel);
+                else modelSource = "saved session";
                 approvalRouter.clearSessionGrants();
                 out.println("Recovered as: " + session.id());
                 break;
+            }
             case "/sessions":
                 listSessions();
                 break;
@@ -369,7 +389,12 @@ final class InteractiveShell implements QuestionFlow {
                 out.println("Session renamed.");
                 break;
             case "/model":
-                out.println("Model " + config.model() + " · source: " + modelSource);
+                modelSource = RuntimeSettingCommands.model(session, argumentAfter(line, "/model"),
+                        sessionRoot, modelSource, out, error);
+                break;
+            case "/effort":
+                effortSource = RuntimeSettingCommands.effort(session, argumentAfter(line, "/effort"),
+                        sessionRoot, effortSource, out, error);
                 break;
             case "/permissions":
                 PermissionCommands.handle(session, argumentAfter(line, "/permissions"),
@@ -411,13 +436,21 @@ final class InteractiveShell implements QuestionFlow {
 
     private void printStatus() {
         out.println("Workspace: " + config.workspace());
-        out.println("Model: " + config.model() + " · source: " + modelSource);
+        out.println("Model: " + session.model() + " · source: " + modelSource);
+        String effort = session.reasoningEffort();
+        out.println("Reasoning effort: " + (effort == null ? "provider default" : effort)
+                + " · source: " + effortSource);
         out.println("Permission mode: " + modeLabel());
         out.println("Session: " + (session.id() == null ? "unsaved (--no-save)" : session.id()));
     }
 
     private String modeLabel() {
         return config.permissionMode().name().toLowerCase(Locale.ROOT);
+    }
+
+    private static boolean modelSourceWinsOverSession(String source) {
+        return source.equals("--model flag") || source.startsWith("env ")
+                || source.equals("saved preference");
     }
 
     /** Text after the command token; empty when the command was typed bare. */
@@ -912,8 +945,9 @@ final class InteractiveShell implements QuestionFlow {
 
     /** Two-line styled welcome replacing the legacy banner in raw mode. */
     private void printWelcome() {
+        String effort = session.reasoningEffort() == null ? "provider default" : session.reasoningEffort();
         String header = ansi.bold() + "java-agent " + Main.VERSION + ansi.reset()
-                + " · " + config.model() + " · " + config.workspace();
+                + " · " + session.model() + " · effort " + effort + " · " + config.workspace();
         if (session.id() != null) header += " · session " + session.id();
         out.println(header);
         out.println(ansi.dim()

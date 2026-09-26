@@ -50,6 +50,42 @@ class MainInfoCommandTest {
     }
 
     @Test
+    void doctorAndStatusReflectSavedSettingsWithoutPrintingTheApiKey() throws Exception {
+        Path home = temporary.resolve("saved-config");
+        UserPreferences.empty(home).withApiKey("private-test-key")
+                .withModel("saved-model").withReasoningEffort("high").save();
+
+        JsonNode doctor = runJson(new String[]{"doctor", "--json", "--workspace", temporary.toString()},
+                Map.of("JAVA_AGENT_HOME", home.toString()));
+        assertEquals(0, doctor.path("fail_count").asInt());
+        assertTrue(doctor.toString().contains("OpenAI API key available"));
+        assertFalse(doctor.toString().contains("private-test-key"));
+
+        JsonNode savedStatus = runJson(new String[]{"status", "--json"},
+                Map.of("JAVA_AGENT_HOME", home.toString()));
+        assertEquals("saved-model", savedStatus.path("model").asText());
+        assertEquals("high", savedStatus.path("reasoning_effort").asText());
+
+        JsonNode envStatus = runJson(new String[]{"status", "--json"},
+                Map.of("JAVA_AGENT_HOME", home.toString(), "OPENAI_MODEL", "env-model",
+                        "OPENAI_REASONING_EFFORT", "low"));
+        assertEquals("env-model", envStatus.path("model").asText());
+        assertEquals("low", envStatus.path("reasoning_effort").asText());
+        assertFalse(envStatus.toString().contains("private-test-key"));
+    }
+
+    @Test
+    void cliRejectsUnsupportedEffortWithSupportedChoices() throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        ByteArrayOutputStream errors = new ByteArrayOutputStream();
+        int code = Main.run(new String[]{"--effort", "automatic", "ask", "hello"},
+                Map.of("OPENAI_API_KEY", "test-key", "JAVA_AGENT_HOME", temporary.resolve("state").toString()),
+                new PrintStream(output), new PrintStream(errors));
+        assertEquals(2, code);
+        assertTrue(errors.toString(StandardCharsets.UTF_8).contains("none, minimal, low, medium, high, xhigh, max"));
+    }
+
+    @Test
     void sessionsListingIsNoAuthAndDoesNotCreateEmptyState() throws Exception {
         Path state = temporary.resolve("session-state");
         JsonNode empty = runJson(new String[]{"sessions", "--json"}, Map.of("JAVA_AGENT_HOME", state.toString()));

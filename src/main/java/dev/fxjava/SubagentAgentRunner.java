@@ -8,13 +8,15 @@ import java.io.PrintStream;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 
 /** Reconfigurable Responses-backed child while retaining its conversation. */
 final class SubagentAgentRunner implements SubagentManager.ChildRunner {
     private final ObjectMapper json;
     private final String apiKey;
     private final String baseUrl;
-    private final String defaultModel;
+    private final String fallbackModel;
+    private final Supplier<ModelSelection> defaultSelection;
     private final Path workspace;
     private final int maxSteps;
     private final Path sessionRoot;
@@ -31,7 +33,8 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
                         ApprovalPolicy parentApproval, PrintStream progress,
                         SubagentManager.ChildConfiguration configuration) throws Exception {
         this(json, apiKey, baseUrl, defaultModel, workspace, maxSteps, sessionRoot, tools,
-                parentApproval, progress, configuration, null);
+                parentApproval, progress, configuration, null, new ContextBudget(),
+                () -> new ModelSelection(defaultModel, null));
     }
 
     SubagentAgentRunner(ObjectMapper json, String apiKey, String baseUrl, String defaultModel, Path workspace, int maxSteps,
@@ -40,7 +43,8 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
                         SubagentManager.ChildConfiguration configuration,
                         Agent.ParentContext parentContext) throws Exception {
         this(json, apiKey, baseUrl, defaultModel, workspace, maxSteps, sessionRoot, tools,
-                parentApproval, progress, configuration, parentContext, new ContextBudget());
+                parentApproval, progress, configuration, parentContext, new ContextBudget(),
+                () -> new ModelSelection(defaultModel, null));
     }
 
     SubagentAgentRunner(ObjectMapper json, String apiKey, String baseUrl, String defaultModel, Path workspace, int maxSteps,
@@ -48,10 +52,23 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
                         ApprovalPolicy parentApproval, PrintStream progress,
                         SubagentManager.ChildConfiguration configuration,
                         Agent.ParentContext parentContext, ContextBudget contextBudget) throws Exception {
+        this(json, apiKey, baseUrl, defaultModel, workspace, maxSteps, sessionRoot, tools,
+                parentApproval, progress, configuration, parentContext, contextBudget,
+                () -> new ModelSelection(defaultModel, null));
+    }
+
+    SubagentAgentRunner(ObjectMapper json, String apiKey, String baseUrl, String defaultModel, Path workspace,
+                        int maxSteps, Path sessionRoot, AtomicReference<List<Tool>> tools,
+                        ApprovalPolicy parentApproval, PrintStream progress,
+                        SubagentManager.ChildConfiguration configuration,
+                        Agent.ParentContext parentContext, ContextBudget contextBudget,
+                        Supplier<ModelSelection> defaultSelection) throws Exception {
         this.json = json;
         this.apiKey = apiKey;
         this.baseUrl = baseUrl;
-        this.defaultModel = defaultModel;
+        this.fallbackModel = defaultModel;
+        this.defaultSelection = defaultSelection == null
+                ? () -> new ModelSelection(defaultModel, null) : defaultSelection;
         this.workspace = workspace;
         this.maxSteps = maxSteps;
         this.sessionRoot = sessionRoot;
@@ -64,7 +81,11 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
         this.agent = build(configuration);
     }
 
-    @Override public synchronized String prompt(String prompt) throws Exception { return agent.prompt(prompt); }
+    @Override
+    public synchronized String prompt(String prompt) throws Exception {
+        agent.setModelSelection(selectionFor(configuration));
+        return agent.prompt(prompt);
+    }
 
     @Override
     public synchronized void configure(SubagentManager.ChildConfiguration replacement) throws Exception {
@@ -96,9 +117,7 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
     }
 
     private Agent build(SubagentManager.ChildConfiguration child) throws Exception {
-        String model = child.model() == null ? defaultModel : child.model();
-        AgentConfig config = new AgentConfig(apiKey, baseUrl, model, workspace, maxSteps, child.permissionMode(),
-                contextBudget.requestTokenBudget(), contextBudget.triggerPercent(), contextBudget.imageTokenReserve());
+        AgentConfig config = configFor(child);
         ToolResultStore results = new ToolResultStore(sessionRoot);
         results.setSession(child.id());
         List<Tool> childTools = new java.util.ArrayList<>();
@@ -116,15 +135,31 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
     }
 
     private String instructionsFor(SubagentManager.ChildConfiguration child, String prior) throws Exception {
-        AgentConfig config = new AgentConfig(apiKey, baseUrl,
-                child.model() == null ? defaultModel : child.model(), workspace, maxSteps, child.permissionMode(),
-                contextBudget.requestTokenBudget(), contextBudget.triggerPercent(), contextBudget.imageTokenReserve());
+        AgentConfig config = configFor(child);
         String identity = "\nSubagent identity: " + child.id() + " (" + child.name() + ").\n";
         if (prior != null) {
             int marker = prior.indexOf("\nSubagent identity:");
             return (marker >= 0 ? prior.substring(0, marker) : prior) + identity;
         }
         return Agent.defaultSystemPrompt(config) + SkillTool.catalog(workspace, sessionRoot) + identity;
+    }
+
+    private AgentConfig configFor(SubagentManager.ChildConfiguration child) {
+        ModelSelection selection = selectionFor(child);
+        return new AgentConfig(apiKey, baseUrl, selection.model(), workspace, maxSteps, child.permissionMode(),
+                contextBudget.requestTokenBudget(), contextBudget.triggerPercent(), contextBudget.imageTokenReserve(),
+                selection.reasoningEffort());
+    }
+
+    private ModelSelection selectionFor(SubagentManager.ChildConfiguration child) {
+        ModelSelection inherited = defaultSelection.get();
+        if (inherited == null) inherited = new ModelSelection(fallbackModel, null);
+        String model = child.model() == null || child.model().isBlank() ? inherited.model() : child.model();
+        String configuredEffort = child.effort();
+        String effort = configuredEffort == null || configuredEffort.isBlank()
+                ? inherited.reasoningEffort()
+                : configuredEffort.equalsIgnoreCase("default") ? null : configuredEffort;
+        return new ModelSelection(model, effort);
     }
 
     static ApprovalPolicy approval(PermissionMode mode, ApprovalPolicy parentAuthority, PrintStream progress) {

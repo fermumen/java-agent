@@ -28,11 +28,13 @@ final class AcpAgentBackend implements AcpServer.Backend {
     private final McpRuntime mcp;
     private final SubagentManager subagents;
     private final List<Tool> tools;
-    private final AtomicReference<String> activeModel = new AtomicReference<>();
+    private final AtomicReference<ModelSelection> activeModelSelection = new AtomicReference<>();
     private final PrintStream quiet = new PrintStream(OutputStream.nullOutputStream());
     private SessionStore store;
     private SessionRuntime session;
     private String model;
+    private final String defaultReasoningEffort;
+    private String reasoningEffort;
     private String mode = "ask";
 
     AcpAgentBackend(ObjectMapper json, String apiKey, String baseUrl, String defaultModel,
@@ -46,16 +48,27 @@ final class AcpAgentBackend implements AcpServer.Backend {
                     Path workspace, int maxSteps, PermissionMode permissionCeiling,
                     Path sessionRoot, Path mcpConfig, boolean webSearch,
                     ContextBudget contextBudget) throws Exception {
+        this(json, apiKey, baseUrl, defaultModel, workspace, maxSteps, permissionCeiling,
+                sessionRoot, mcpConfig, webSearch, contextBudget, null);
+    }
+
+    AcpAgentBackend(ObjectMapper json, String apiKey, String baseUrl, String defaultModel,
+                    Path workspace, int maxSteps, PermissionMode permissionCeiling,
+                    Path sessionRoot, Path mcpConfig, boolean webSearch,
+                    ContextBudget contextBudget, String reasoningEffort) throws Exception {
         this.json = json;
         this.apiKey = apiKey;
         this.baseUrl = baseUrl;
-        this.defaultModel = defaultModel;
+        ModelSelection defaults = new ModelSelection(defaultModel, reasoningEffort);
+        this.defaultModel = defaults.model();
+        this.defaultReasoningEffort = defaults.reasoningEffort();
         this.workspace = workspace.toRealPath();
         this.maxSteps = maxSteps;
         this.permissionCeiling = permissionCeiling;
         this.sessionRoot = sessionRoot.toAbsolutePath().normalize();
         this.contextBudget = contextBudget;
-        this.model = defaultModel;
+        this.model = this.defaultModel;
+        this.reasoningEffort = defaults.reasoningEffort();
         this.resultStore = new ToolResultStore(this.sessionRoot);
         this.mcp = McpRuntime.load(json, mcpConfig);
 
@@ -66,10 +79,10 @@ final class AcpAgentBackend implements AcpServer.Backend {
         catalog.add(new ReadToolResultTool(resultStore));
         catalog.addAll(mcp.tools());
         AtomicReference<List<Tool>> childTools = new AtomicReference<>();
-        activeModel.set(defaultModel);
+        activeModelSelection.set(defaults);
         this.subagents = new SubagentManager(json, child -> new SubagentAgentRunner(json, apiKey, baseUrl,
-                activeModel.get(), this.workspace, maxSteps, this.sessionRoot, childTools,
-                approval(effectivePermission()), quiet, child, null, contextBudget),
+                defaultModel, this.workspace, maxSteps, this.sessionRoot, childTools,
+                approval(effectivePermission()), quiet, child, null, contextBudget, activeModelSelection::get),
                 permissionCeiling, this.sessionRoot);
         catalog.add(new SubagentTool(subagents));
         this.tools = List.copyOf(catalog);
@@ -87,7 +100,8 @@ final class AcpAgentBackend implements AcpServer.Backend {
     public synchronized String newSession(List<JsonNode> mcpServers) throws Exception {
         rejectSuppliedMcp(mcpServers);
         model = defaultModel;
-        activeModel.set(model);
+        reasoningEffort = defaultReasoningEffort;
+        activeModelSelection.set(new ModelSelection(model, reasoningEffort));
         mode = "ask";
         Agent agent = buildAgent();
         session = SessionRuntime.start(agent, store(), workspace, model, systemPrompt(), null);
@@ -100,7 +114,8 @@ final class AcpAgentBackend implements AcpServer.Backend {
         SessionStore.Snapshot snapshot = store().load(id);
         requireWorkspace(snapshot);
         model = snapshot.model();
-        activeModel.set(model);
+        reasoningEffort = defaultReasoningEffort;
+        activeModelSelection.set(new ModelSelection(model, reasoningEffort));
         mode = "ask";
         Agent agent = buildAgent();
         session = SessionRuntime.start(agent, store, workspace, model, systemPrompt(), id);
@@ -135,15 +150,13 @@ final class AcpAgentBackend implements AcpServer.Backend {
     @Override
     public synchronized void setModel(String value) throws Exception {
         requireActive();
-        if (value == null || value.isBlank() || value.length() > 200) {
-            throw new IllegalArgumentException("Invalid session model");
-        }
+        String selectedModel = ModelSelection.normalizeModel(value);
         PermissionMode permission = effectivePermission(mode);
-        Agent replacement = buildAgent(value, permission);
-        String instructions = systemPrompt(value, permission);
-        session.reconfigure(replacement, value, instructions);
-        model = value;
-        activeModel.set(value);
+        Agent replacement = buildAgent(selectedModel, reasoningEffort, permission);
+        String instructions = systemPrompt(selectedModel, permission);
+        session.reconfigure(replacement, selectedModel, instructions);
+        model = selectedModel;
+        activeModelSelection.set(new ModelSelection(model, reasoningEffort));
     }
 
     @Override
@@ -151,7 +164,7 @@ final class AcpAgentBackend implements AcpServer.Backend {
         requireActive();
         if (!value.equals("ask") && !value.equals("code")) throw new IllegalArgumentException("Invalid session mode");
         PermissionMode permission = effectivePermission(value);
-        Agent replacement = buildAgent(model, permission);
+        Agent replacement = buildAgent(model, reasoningEffort, permission);
         String instructions = systemPrompt(model, permission);
         session.reconfigure(replacement, model, instructions);
         mode = value;
@@ -183,8 +196,13 @@ final class AcpAgentBackend implements AcpServer.Backend {
     }
 
     private Agent buildAgent(String selectedModel, PermissionMode permission) throws Exception {
+        return buildAgent(selectedModel, reasoningEffort, permission);
+    }
+
+    private Agent buildAgent(String selectedModel, String selectedEffort, PermissionMode permission) throws Exception {
         AgentConfig config = new AgentConfig(apiKey, baseUrl, selectedModel, workspace, maxSteps, permission,
-                contextBudget.requestTokenBudget(), contextBudget.triggerPercent(), contextBudget.imageTokenReserve());
+                contextBudget.requestTokenBudget(), contextBudget.triggerPercent(), contextBudget.imageTokenReserve(),
+                selectedEffort);
         return new Agent(json, new OpenAiResponsesClient(json, config), tools, approval(permission), quiet,
                 maxSteps, systemPrompt(selectedModel, permission), resultStore, null, contextBudget);
     }
@@ -195,7 +213,8 @@ final class AcpAgentBackend implements AcpServer.Backend {
 
     private String systemPrompt(String selectedModel, PermissionMode permission) throws Exception {
         AgentConfig config = new AgentConfig(apiKey, baseUrl, selectedModel, workspace, maxSteps, permission,
-                contextBudget.requestTokenBudget(), contextBudget.triggerPercent(), contextBudget.imageTokenReserve());
+                contextBudget.requestTokenBudget(), contextBudget.triggerPercent(), contextBudget.imageTokenReserve(),
+                reasoningEffort);
         return Agent.defaultSystemPrompt(config) + SkillTool.catalog(workspace, sessionRoot);
     }
 

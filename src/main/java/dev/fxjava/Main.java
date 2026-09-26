@@ -14,6 +14,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -55,18 +56,39 @@ public final class Main {
             return 0;
         }
         if ("acp".equals(options.command)) return runAcp(options, environment, standardInput, out, error);
-        if (options.command != null) return runInfoCommand(options, environment, out);
+        if (options.command != null) return runInfoCommand(options, environment, out, error);
 
+        Path sessionRoot = sessionRoot(options, environment);
+        UserPreferences preferences = loadPreferences(sessionRoot, error);
+        Console console = System.console();
         String apiKey = firstNonBlank(environment.get("OPENAI_API_KEY"),
-                environment.get("JAVA_AGENT_API_KEY"));
+                environment.get("JAVA_AGENT_API_KEY"), preferences.apiKey());
+        if (apiKey == null && console != null && !options.json) {
+            apiKey = ApiKeyOnboarding.request(new ApiKeyOnboarding.Prompt() {
+                @Override public char[] readPassword(String prompt) {
+                    return console.readPassword("%s", prompt);
+                }
+
+                @Override public String readLine(String prompt) {
+                    return console.readLine("%s", prompt);
+                }
+            }, preferences, error);
+        }
         if (apiKey == null) {
-            error.println("java-agent: set OPENAI_API_KEY (or JAVA_AGENT_API_KEY)");
+            error.println("java-agent: set OPENAI_API_KEY (or JAVA_AGENT_API_KEY), or run interactively without --json to enter one.");
             return 2;
         }
         String baseUrl = firstNonBlank(options.baseUrl, environment.get("OPENAI_BASE_URL"),
                 environment.get("JAVA_AGENT_BASE_URL"), "https://api.openai.com/v1");
         String model = firstNonBlank(options.model, environment.get("OPENAI_MODEL"),
-                environment.get("JAVA_AGENT_MODEL"), "gpt-5.6");
+                environment.get("JAVA_AGENT_MODEL"), preferences.model(), "gpt-5.6");
+        String reasoningEffort;
+        try {
+            reasoningEffort = resolveEffort(options.effort, environment, preferences);
+        } catch (IllegalArgumentException invalidEffort) {
+            error.println("java-agent: " + invalidEffort.getMessage());
+            return 2;
+        }
         Path workspace = options.workspace == null ? Path.of("") : Path.of(options.workspace);
         if (!Files.isDirectory(workspace)) {
             error.println("java-agent: workspace is not a directory: " + workspace);
@@ -82,16 +104,13 @@ public final class Main {
                 : PermissionMode.parse(firstNonBlank(environment.get("JAVA_AGENT_PERMISSION_MODE"), "ask"));
         ContextBudget contextBudget = contextBudget(environment);
         AgentConfig config = new AgentConfig(apiKey, baseUrl, model, workspace, options.maxSteps, permissionMode,
-                contextBudget.requestTokenBudget(), contextBudget.triggerPercent(), contextBudget.imageTokenReserve());
+                contextBudget.requestTokenBudget(), contextBudget.triggerPercent(), contextBudget.imageTokenReserve(),
+                reasoningEffort);
         if (options.yoloWarning) error.println("YOLO enabled: permissions disabled");
         ObjectMapper json = new ObjectMapper();
         BufferedReader input = new BufferedReader(new InputStreamReader(standardInput));
-        Console console = System.console();
         ApprovalRouter approval = approvalOverride == null
                 ? new ApprovalRouter(approvalPolicy(config, input, error, console)) : approvalOverride;
-        String configuredRoot = firstNonBlank(options.sessionRoot, environment.get("JAVA_AGENT_HOME"));
-        Path sessionRoot = configuredRoot == null
-                ? Path.of(System.getProperty("user.home"), ".java-agent") : Path.of(configuredRoot);
         SessionStore store = options.noSave ? null : new SessionStore(json, sessionRoot);
         ToolResultStore resultStore = new ToolResultStore(sessionRoot);
         Path mcpConfig = options.mcpConfig == null ? sessionRoot.resolve("mcp.json") : Path.of(options.mcpConfig);
@@ -114,7 +133,12 @@ public final class Main {
                         config.workspace(), config.maxSteps(), sessionRoot, childTools,
                         approval.childAuthority(authorityRules(child, activeSession.get(), store)),
                         error, child,
-                        subagentRuntime.get().parentContext(child.id()), config.contextBudget()),
+                        subagentRuntime.get().parentContext(child.id()), config.contextBudget(),
+                        () -> {
+                            SessionRuntime active = activeSession.get();
+                            return active == null ? new ModelSelection(config.model(), config.reasoningEffort())
+                                    : active.modelSelection();
+                        }),
                 permissionMode, options.noSave ? null : sessionRoot,
                 () -> activeSession.get() == null ? null : activeSession.get().id())) {
         subagentRuntime.set(subagents);
@@ -125,6 +149,11 @@ public final class Main {
                 subagents.parentContext("root"), config.contextBudget());
         SessionRuntime session = SessionRuntime.start(agent, store, config.workspace(), config.model(),
                 systemPrompt, options.resume);
+        if (options.model != null || notBlank(environment.get("OPENAI_MODEL"))
+                || notBlank(environment.get("JAVA_AGENT_MODEL")) || preferences.model() != null) {
+            session.setModel(model);
+        }
+        if (reasoningEffort != null) session.setReasoningEffort(reasoningEffort);
         approval.bindRules(session::rules, config.approveAll());
         activeSession.set(session);
         subagents.restore();
@@ -142,15 +171,18 @@ public final class Main {
                     Ansi ansi = Ansi.fromEnvironment(environment, true);
                     InteractiveShell shell = new InteractiveShell(session, config, systemPrompt, mcp,
                             sessionRoot, standardInput, out, error, ansi, approval,
-                            modelSource(options, environment), System::nanoTime);
+                            modelSource(options, environment, preferences, options.resume),
+                            effortSource(options, environment, preferences), System::nanoTime);
                     return shell.run(owned, capabilities);
                 }
             }
         }
-        out.println("java-agent " + VERSION + " | Responses API | " + config.model()
+        String activeModelSource = modelSource(options, environment, preferences, options.resume);
+        String activeEffortSource = effortSource(options, environment, preferences);
+        out.println("java-agent " + VERSION + " | Responses API | " + session.model()
                 + " | " + config.workspace());
         if (session.id() != null) out.println("Session: " + session.id());
-        out.println("Enter a request. Commands: /new, /clear, /sessions, /resume <id|last>, /recover <id>, /rename <title>, /permissions, /stats, /compact, /image <path>, /mcp list, /exit");
+        out.println("Enter a request. Commands: /new, /clear, /sessions, /resume <id|last>, /recover <id>, /rename <title>, /model, /effort, /permissions, /stats, /compact, /image <path>, /mcp list, /exit");
         while (true) {
             out.print("> ");
             out.flush();
@@ -167,16 +199,24 @@ public final class Main {
                 session.clear(systemPrompt);
                 out.println("Conversation cleared.");
             } else if (line.equals("/new")) {
-                session.newSession(config.workspace(), config.model(), systemPrompt);
+                session.newSession(config.workspace(), session.model(), systemPrompt);
                 approval.clearSessionGrants();
                 out.println("New session: " + session.id());
             } else if (line.equals("/resume") || line.startsWith("/resume ")) {
                 String id = line.equals("/resume") ? "last" : line.substring("/resume ".length()).trim();
+                String selectedModel = session.model();
+                boolean keepConfiguredModel = modelSourceWinsOverSession(activeModelSource);
                 session.resume(id, config.workspace());
+                if (keepConfiguredModel) session.setModel(selectedModel);
+                else activeModelSource = "saved session";
                 approval.clearSessionGrants();
                 out.println("Resumed session: " + session.id());
             } else if (line.startsWith("/recover ")) {
+                String selectedModel = session.model();
+                boolean keepConfiguredModel = modelSourceWinsOverSession(activeModelSource);
                 session.recover(line.substring("/recover ".length()).trim(), config.workspace());
+                if (keepConfiguredModel) session.setModel(selectedModel);
+                else activeModelSource = "saved session";
                 approval.clearSessionGrants();
                 out.println("Recovered as: " + session.id());
             } else if (line.equals("/sessions")) {
@@ -190,6 +230,14 @@ public final class Main {
             } else if (line.startsWith("/rename ")) {
                 session.rename(line.substring("/rename ".length()));
                 out.println("Session renamed.");
+            } else if (isCommand(line, "/model")) {
+                activeModelSource = RuntimeSettingCommands.model(session,
+                        line.substring("/model".length()).trim(), sessionRoot,
+                        activeModelSource, out, error);
+            } else if (isCommand(line, "/effort")) {
+                activeEffortSource = RuntimeSettingCommands.effort(session,
+                        line.substring("/effort".length()).trim(), sessionRoot,
+                        activeEffortSource, out, error);
             } else if (isCommand(line, "/permissions")) {
                 PermissionCommands.handle(session,
                         line.substring("/permissions".length()),
@@ -225,48 +273,63 @@ public final class Main {
             error.println("java-agent: ACP requires durable sessions; remove --no-save");
             return 2;
         }
-        String apiKey = firstNonBlank(environment.get("OPENAI_API_KEY"), environment.get("JAVA_AGENT_API_KEY"));
+        Path sessionRoot = sessionRoot(options, environment);
+        UserPreferences preferences = loadPreferences(sessionRoot, error);
+        String apiKey = firstNonBlank(environment.get("OPENAI_API_KEY"), environment.get("JAVA_AGENT_API_KEY"),
+                preferences.apiKey());
         String baseUrl = firstNonBlank(options.baseUrl, environment.get("OPENAI_BASE_URL"),
                 environment.get("JAVA_AGENT_BASE_URL"), "https://api.openai.com/v1");
         String model = firstNonBlank(options.model, environment.get("OPENAI_MODEL"),
-                environment.get("JAVA_AGENT_MODEL"), "gpt-5.6");
+                environment.get("JAVA_AGENT_MODEL"), preferences.model(), "gpt-5.6");
+        String reasoningEffort;
+        try {
+            reasoningEffort = resolveEffort(options.effort, environment, preferences);
+        } catch (IllegalArgumentException invalidEffort) {
+            error.println("java-agent: " + invalidEffort.getMessage());
+            return 2;
+        }
         Path workspace = options.workspace == null ? Path.of("") : Path.of(options.workspace);
         if (!Files.isDirectory(workspace)) {
             error.println("java-agent: workspace is not a directory: " + workspace);
             return 2;
         }
         PermissionMode ceiling = options.permissionMode != null ? options.permissionMode : PermissionMode.AUTO;
-        String configuredRoot = firstNonBlank(options.sessionRoot, environment.get("JAVA_AGENT_HOME"));
-        Path sessionRoot = configuredRoot == null
-                ? Path.of(System.getProperty("user.home"), ".java-agent") : Path.of(configuredRoot);
         Path mcpConfig = options.mcpConfig == null ? sessionRoot.resolve("mcp.json") : Path.of(options.mcpConfig);
         ObjectMapper json = new ObjectMapper();
         ContextBudget contextBudget = contextBudget(environment);
         AcpAgentBackend backend = new AcpAgentBackend(json, apiKey, baseUrl, model, workspace,
                 options.maxSteps, ceiling, sessionRoot, mcpConfig,
                 options.webSearch || Boolean.parseBoolean(environment.getOrDefault("JAVA_AGENT_WEB_SEARCH", "false")),
-                contextBudget);
+                contextBudget, reasoningEffort);
         new AcpServer(json, backend).serve(input, out);
         return 0;
     }
 
-    private static int runInfoCommand(Options options, Map<String, String> environment, PrintStream out)
+    private static int runInfoCommand(Options options, Map<String, String> environment,
+                                      PrintStream out, PrintStream error)
             throws Exception {
         ObjectMapper json = new ObjectMapper();
         PermissionMode mode = options.permissionMode != null ? options.permissionMode
                 : PermissionMode.parse(firstNonBlank(environment.get("JAVA_AGENT_PERMISSION_MODE"), "ask"));
+        UserPreferences preferences = options.command.equals("doctor") || options.command.equals("status")
+                ? loadPreferences(sessionRoot(options, environment), error)
+                : UserPreferences.empty(sessionRoot(options, environment));
         ObjectNode result = json.createObjectNode().put("kind", options.command);
         switch (options.command) {
             case "status": {
                 Path workspace = options.workspace == null ? Path.of("") : Path.of(options.workspace);
                 result.put("version", VERSION).put("workspace", workspace.toAbsolutePath().normalize().toString())
                         .put("model", firstNonBlank(options.model, environment.get("OPENAI_MODEL"),
-                                environment.get("JAVA_AGENT_MODEL"), "gpt-5.6"))
+                                environment.get("JAVA_AGENT_MODEL"), preferences.model(), "gpt-5.6"))
                         .put("transport", "responses").put("gateway", false)
                         .put("permission_mode", mode.name().toLowerCase(java.util.Locale.ROOT))
                         .put("sandbox", "none")
                         .put("web_search", options.webSearch
                                 || Boolean.parseBoolean(environment.getOrDefault("JAVA_AGENT_WEB_SEARCH", "false")));
+                String effort = firstNonBlank(options.effort, environment.get("OPENAI_REASONING_EFFORT"),
+                        environment.get("JAVA_AGENT_REASONING_EFFORT"), preferences.reasoningEffort());
+                if (effort == null || effort.equalsIgnoreCase("default")) result.putNull("reasoning_effort");
+                else result.put("reasoning_effort", effort.strip().toLowerCase(Locale.ROOT));
                 break;
             }
             case "permissions": {
@@ -307,7 +370,7 @@ public final class Main {
                 checks.addObject().put("name", "workspace").put("status", workspaceOk ? "ok" : "fail")
                         .put("detail", workspace.toAbsolutePath().normalize().toString());
                 boolean authenticated = firstNonBlank(environment.get("OPENAI_API_KEY"),
-                        environment.get("JAVA_AGENT_API_KEY")) != null;
+                        environment.get("JAVA_AGENT_API_KEY"), preferences.apiKey()) != null;
                 checks.addObject().put("name", "auth").put("status", authenticated ? "ok" : "fail")
                         .put("detail", authenticated ? "OpenAI API key available" : "OpenAI API key is not configured");
                 int failures = (workspaceOk ? 0 : 1) + (authenticated ? 0 : 1);
@@ -424,11 +487,56 @@ public final class Main {
         };
     }
 
-    private static String modelSource(Options options, Map<String, String> environment) {
+    private static String modelSource(Options options, Map<String, String> environment,
+                                     UserPreferences preferences, String resume) {
         if (options.model != null) return "--model flag";
         if (notBlank(environment.get("OPENAI_MODEL"))) return "env OPENAI_MODEL";
         if (notBlank(environment.get("JAVA_AGENT_MODEL"))) return "env JAVA_AGENT_MODEL";
+        if (preferences.model() != null) return "saved preference";
+        if (resume != null) return "saved session";
         return "default";
+    }
+
+    private static boolean modelSourceWinsOverSession(String source) {
+        return source.equals("--model flag") || source.startsWith("env ")
+                || source.equals("saved preference");
+    }
+
+    private static String effortSource(Options options, Map<String, String> environment,
+                                       UserPreferences preferences) {
+        if (options.effort != null) return "--effort flag";
+        if (notBlank(environment.get("OPENAI_REASONING_EFFORT"))) return "env OPENAI_REASONING_EFFORT";
+        if (notBlank(environment.get("JAVA_AGENT_REASONING_EFFORT"))) return "env JAVA_AGENT_REASONING_EFFORT";
+        if (preferences.reasoningEffort() != null) return "saved preference";
+        return "provider default";
+    }
+
+    private static String resolveEffort(String option, Map<String, String> environment,
+                                        UserPreferences preferences) {
+        String selected = firstNonBlank(option, environment.get("OPENAI_REASONING_EFFORT"),
+                environment.get("JAVA_AGENT_REASONING_EFFORT"), preferences.reasoningEffort());
+        if (selected == null || selected.equalsIgnoreCase("default")) return null;
+        selected = selected.strip().toLowerCase(Locale.ROOT);
+        if (!AgentConfig.reasoningEffortValues().contains(selected)) {
+            throw new IllegalArgumentException("--effort must be one of "
+                    + String.join(", ", AgentConfig.reasoningEffortValues()) + " (or default)");
+        }
+        return selected;
+    }
+
+    private static Path sessionRoot(Options options, Map<String, String> environment) {
+        String configured = firstNonBlank(options.sessionRoot, environment.get("JAVA_AGENT_HOME"));
+        return configured == null ? Path.of(System.getProperty("user.home"), ".java-agent")
+                : Path.of(configured);
+    }
+
+    private static UserPreferences loadPreferences(Path root, PrintStream error) {
+        try {
+            return UserPreferences.load(root);
+        } catch (IOException invalid) {
+            error.println("java-agent: saved settings could not be read securely; ignoring them.");
+            return UserPreferences.empty(root);
+        }
     }
 
     private static boolean notBlank(String value) {
@@ -499,6 +607,7 @@ public final class Main {
                 + "\n"
                 + "Options:\n"
                 + "  --model <id>          OpenAI model (env: OPENAI_MODEL; default: gpt-5.6)\n"
+                + "  --effort <level>      none|minimal|low|medium|high|xhigh|max|default (env: OPENAI_REASONING_EFFORT)\n"
                 + "  --base-url <url>      OpenAI API base URL (env: OPENAI_BASE_URL)\n"
                 + "  --workspace <path>    Workspace root (default: current directory)\n"
                 + "  --max-steps <count>   Maximum response/tool iterations, 1-100 (default: 20)\n"
@@ -516,7 +625,9 @@ public final class Main {
                 + "  --version             Show version\n"
                 + "\n"
                 + "Authentication:\n"
-                + "  OPENAI_API_KEY (JAVA_AGENT_API_KEY is also accepted)\n"
+                + "  OPENAI_API_KEY (JAVA_AGENT_API_KEY is also accepted); interactive first run prompts securely\n"
+                + "  OPENAI_MODEL (JAVA_AGENT_MODEL fallback); OPENAI_REASONING_EFFORT (JAVA_AGENT_REASONING_EFFORT fallback)\n"
+                + "  Interactive selectors: /model [<id> [--save]], /effort [<level|default> [--save]]\n"
                 + "\n"
                 + "The harness uses POST /v1/responses with store=false.\n"
                 + "Interactive keys: Tab completes /commands, Ctrl+C cancels (twice exits), /help lists more.\n"
@@ -533,6 +644,7 @@ public final class Main {
     private static final class Options {
         String baseUrl;
         String model;
+        String effort;
         String workspace;
         String resume;
         String sessionRoot;
@@ -582,6 +694,7 @@ public final class Main {
                         break;
                     }
                     case "--model": result.model = requireValue(args, ++index, argument); break;
+                    case "--effort": result.effort = requireValue(args, ++index, argument); break;
                     case "--base-url": result.baseUrl = requireValue(args, ++index, argument); break;
                     case "--workspace": result.workspace = requireValue(args, ++index, argument); break;
                     case "--resume": result.resume = requireValue(args, ++index, argument); break;

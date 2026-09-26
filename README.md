@@ -116,6 +116,37 @@ export OPENAI_API_KEY="..."
 java -jar target/java-agent.jar
 ```
 
+When started in a terminal without an API key, `java-agent` asks for it with
+input hidden, then asks whether to save it as unencrypted text. Press Enter at
+the save prompt to keep the key in memory for this run only. Saying yes stores
+it in `user-settings.json` under `JAVA_AGENT_HOME` (or `~/.java-agent` by
+default); `--session-root` can select another settings root. The file is
+unencrypted and uses owner-only permissions on supported filesystems; saving
+is refused if private permissions cannot be enforced. The prompt does not
+place the key in shell history, conversation history, or logs. Headless runs
+do not prompt and fail with an environment-variable hint. Environment keys
+take precedence over the saved key.
+
+Select a model or reasoning effort at startup, or change the active session
+with `/model <id>` and `/effort <level>`. CLI options override environment
+variables, which override explicitly saved preferences:
+
+```sh
+java-agent --model gpt-5.6 --effort high ask "Review this project"
+export OPENAI_MODEL="gpt-5.6"
+export OPENAI_REASONING_EFFORT="medium"
+```
+
+`JAVA_AGENT_MODEL` and `JAVA_AGENT_REASONING_EFFORT` are fallback environment
+names. The model precedence is `--model`, `OPENAI_MODEL`, `JAVA_AGENT_MODEL`,
+saved preference, then `gpt-5.6`. Bare `/model` and `/effort` show the active
+values. Add `--save` to a slash command to keep that preference in
+`user-settings.json`; environment and CLI options still take precedence on the
+next run. `/effort default` omits the
+effort field and leaves the provider/model default in effect. Supported effort
+values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; the
+provider may reject a value for a particular model.
+
 Run one request:
 
 ```sh

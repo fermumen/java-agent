@@ -100,6 +100,32 @@ public final class Agent {
 
     ContextBudget contextBudget() { return contextBudget; }
 
+    ModelSelection modelSelection() {
+        if (client instanceof OpenAiResponsesClient) {
+            return ((OpenAiResponsesClient) client).modelSelection();
+        }
+        return null;
+    }
+
+    void setModelSelection(ModelSelection selection) {
+        if (!(client instanceof OpenAiResponsesClient)) {
+            throw new IllegalStateException("The active response client does not support model selection");
+        }
+        ((OpenAiResponsesClient) client).setModelSelection(selection);
+    }
+
+    void setModel(String model) {
+        ModelSelection current = modelSelection();
+        if (current == null) throw new IllegalStateException("The active response client does not expose model selection");
+        setModelSelection(current.withModel(model));
+    }
+
+    void setReasoningEffort(String effort) {
+        ModelSelection current = modelSelection();
+        if (current == null) throw new IllegalStateException("The active response client does not expose model selection");
+        setModelSelection(current.withReasoningEffort(effort));
+    }
+
     long fixedRequestTokens() throws IOException {
         long fixed = contextBudget.estimateTextTokens(instructions)
                 + contextBudget.estimateTokens(buildToolDefinitions(toolCatalog));
