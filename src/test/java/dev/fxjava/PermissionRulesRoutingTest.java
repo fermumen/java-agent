@@ -212,6 +212,37 @@ class PermissionRulesRoutingTest {
         assertTrue(yolo.approve(tool, toolArguments()));
     }
 
+    @Test
+    void yoloChildLosesInheritedBypassWhenParentModeIsLowered() {
+        AtomicReference<PermissionMode> parentMode = new AtomicReference<>(PermissionMode.YOLO);
+        ApprovalPolicy denyAll = new ApprovalPolicy() {
+            @Override public boolean approve(Tool tool, JsonNode arguments) { return false; }
+            @Override public boolean preflightDeny(Tool tool, JsonNode arguments) { return true; }
+        };
+        ApprovalPolicy child = SubagentAgentRunner.approval(PermissionMode.YOLO, denyAll,
+                new PrintStream(new ByteArrayOutputStream()), parentMode::get);
+
+        assertTrue(child.approve(tool, toolArguments()));
+        assertFalse(child.preflightDeny(tool, toolArguments()));
+
+        parentMode.set(PermissionMode.ASK);
+        assertTrue(child.preflightDeny(tool, toolArguments()));
+        assertFalse(child.approve(tool, toolArguments()),
+                "a child cannot retain yolo approval after its parent returns to ask");
+    }
+
+    @Test
+    void dynamicChildAuthorityTracksOwningRulesButNeverInheritsAllows() {
+        ApprovalRouter parent = new ApprovalRouter((asked, arguments) -> false);
+        AtomicReference<SessionRules> owningRules = new AtomicReference<>(new SessionRules());
+        ApprovalPolicy child = parent.childAuthority(owningRules::get);
+        owningRules.get().remember(SessionRules.Kind.DENY, "write_file", smokeKey());
+        owningRules.get().remember(SessionRules.Kind.ALLOW, "allowed", smokeKey());
+
+        assertTrue(child.preflightDeny(tool, toolArguments()));
+        assertFalse(child.preflightDeny(new FixedTool("allowed", "create smoke.txt"), toolArguments()));
+    }
+
     private static ApprovalRouter.Request awaitRequest(ApprovalRouter router) throws InterruptedException {
         long deadline = System.currentTimeMillis() + 5000;
         while (System.currentTimeMillis() < deadline) {

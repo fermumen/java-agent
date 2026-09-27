@@ -37,7 +37,7 @@ final class SubagentManager implements AutoCloseable {
     private static final Set<String> SETTLED = Set.of("idle", "interrupted", "completed", "failed", "cancelled", "archived");
     private final ObjectMapper json;
     private final ChildFactory childFactory;
-    private final PermissionMode parentPermission;
+    private final Supplier<PermissionMode> parentPermission;
     private final ExecutorService executor;
     private final SubagentStateStore stateStore;
     private final LongSupplier clock;
@@ -66,6 +66,17 @@ final class SubagentManager implements AutoCloseable {
 
     private SubagentManager(ObjectMapper json, ChildFactory childFactory, PermissionMode parentPermission,
                             Path stateRoot, LongSupplier clock, Supplier<String> authoritySession) {
+        this(json, childFactory, () -> parentPermission, stateRoot, clock, authoritySession);
+    }
+
+    SubagentManager(ObjectMapper json, ChildFactory childFactory, Supplier<PermissionMode> parentPermission,
+                    Path stateRoot, Supplier<String> authoritySession) {
+        this(json, childFactory, parentPermission, stateRoot, System::currentTimeMillis, authoritySession);
+    }
+
+    private SubagentManager(ObjectMapper json, ChildFactory childFactory,
+                            Supplier<PermissionMode> parentPermission, Path stateRoot, LongSupplier clock,
+                            Supplier<String> authoritySession) {
         this.json = json;
         this.childFactory = childFactory;
         this.parentPermission = parentPermission;
@@ -95,7 +106,7 @@ final class SubagentManager implements AutoCloseable {
             JsonNode config = saved.path("configuration");
             PermissionMode permission;
             try {
-                permission = clamp(PermissionMode.parse(config.path("permission_mode").asText()), parentPermission);
+                permission = clamp(PermissionMode.parse(config.path("permission_mode").asText()), parentPermission());
             } catch (Exception invalid) {
                 continue;
             }
@@ -448,8 +459,9 @@ final class SubagentManager implements AutoCloseable {
         synchronized (children) {
             if (children.size() >= MAX_CHILDREN) throw new SubagentFailure(null, "capacity_exceeded", true);
             id = "child-" + UUID.randomUUID().toString().replace("-", "");
-            String requestedPermission = value.path("permission_mode").asText(parentPermission.name().toLowerCase());
-            PermissionMode permission = clamp(PermissionMode.parse(requestedPermission), parentPermission);
+            PermissionMode parentMode = parentPermission();
+            String requestedPermission = value.path("permission_mode").asText(parentMode.name().toLowerCase());
+            PermissionMode permission = clamp(PermissionMode.parse(requestedPermission), parentMode);
             ChildConfiguration configuration = new ChildConfiguration(id, value.path("name").asText(),
                     value.path("model").isTextual() ? value.path("model").asText() : null,
                     value.path("effort").isTextual() ? value.path("effort").asText() : null, permission,
@@ -577,7 +589,7 @@ final class SubagentManager implements AutoCloseable {
             String model = value.path("model").isTextual() ? value.path("model").asText() : child.configuration.model();
             String effort = value.path("effort").isTextual() ? value.path("effort").asText() : child.configuration.effort();
             PermissionMode permission = value.path("permission_mode").isTextual()
-                    ? clamp(PermissionMode.parse(value.path("permission_mode").asText()), parentPermission)
+                    ? clamp(PermissionMode.parse(value.path("permission_mode").asText()), parentPermission())
                     : child.configuration.permissionMode();
             ChildConfiguration replacement = new ChildConfiguration(child.id, name, model, effort, permission,
                     child.configuration.authoritySessionId());
@@ -850,6 +862,11 @@ final class SubagentManager implements AutoCloseable {
 
     private static PermissionMode clamp(PermissionMode requested, PermissionMode parent) {
         return requested.ordinal() > parent.ordinal() ? parent : requested;
+    }
+
+    private PermissionMode parentPermission() {
+        PermissionMode current = parentPermission.get();
+        return current == null ? PermissionMode.ASK : current;
     }
 
     private static String terminalOrIdle(String archivedFrom) {

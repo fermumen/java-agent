@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.io.PrintStream;
 import java.util.List;
 import java.util.Locale;
+import java.util.function.Consumer;
 
 /**
  * Shared /permissions command handling for the raw shell and the legacy
@@ -23,7 +24,7 @@ final class PermissionCommands {
             "Usage: /permissions remember <allow|deny> <tool-name> <arguments-json>";
     private static final String REVOKE_USAGE = "Usage: /permissions revoke <id>";
     private static final String GENERAL_USAGE =
-            "Usage: /permissions [remember <allow|deny> <tool-name> <arguments-json> | revoke <id>]";
+            "Usage: /permissions [ask|auto|yolo | remember <allow|deny> <tool-name> <arguments-json> | revoke <id>]";
 
     private PermissionCommands() {
     }
@@ -31,6 +32,12 @@ final class PermissionCommands {
     /** Handles one /permissions invocation; {@code argument} is the trimmed remainder. */
     static void handle(SessionRuntime session, String argument, String modeLabel,
                        int grantCount, Ansi ansi, PrintStream out) {
+        handle(session, argument, modeLabel, grantCount, ansi, out, null);
+    }
+
+    static void handle(SessionRuntime session, String argument, String modeLabel,
+                       int grantCount, Ansi ansi, PrintStream out,
+                       Consumer<PermissionMode> modeSetter) {
         String rest = argument == null ? "" : argument.strip();
         if (rest.isEmpty()) {
             summary(session, modeLabel, grantCount, ansi, out);
@@ -39,6 +46,20 @@ final class PermissionCommands {
         int separator = firstWhitespace(rest);
         String action = separator < 0 ? rest : rest.substring(0, separator);
         String remainder = separator < 0 ? "" : rest.substring(separator);
+        PermissionMode requested = permissionMode(action);
+        if (requested != null) {
+            if (!remainder.isBlank() || modeSetter == null) {
+                out.println(GENERAL_USAGE);
+            } else {
+                modeSetter.accept(requested);
+                if (requested == PermissionMode.YOLO) {
+                    out.println("YOLO enabled: all tool approvals and remembered permission rules are bypassed for this run.");
+                } else {
+                    out.println("Permission mode set to " + requested.name().toLowerCase(Locale.ROOT) + ".");
+                }
+            }
+            return;
+        }
         if (action.toLowerCase(Locale.ROOT).equals("remember")) {
             remember(session, remainder, out);
             return;
@@ -55,6 +76,7 @@ final class PermissionCommands {
         SessionRules rules = session.rules();
         List<SessionRules.Rule> active = rules == null ? List.of() : rules.all();
         out.println("mode=" + modeLabel + " grants=" + grantCount + " rules=" + active.size());
+        out.println(GENERAL_USAGE);
         if (!session.persistent()) {
             out.println(ansi.dim() + "Persistent rules need a saved session (--no-save)." + ansi.reset());
             return;
@@ -153,5 +175,14 @@ final class PermissionCommands {
             if (Character.isWhitespace(value.charAt(index))) return index;
         }
         return -1;
+    }
+
+    private static PermissionMode permissionMode(String token) {
+        switch (token.toLowerCase(Locale.ROOT)) {
+            case "ask": return PermissionMode.ASK;
+            case "auto": return PermissionMode.AUTO;
+            case "yolo": return PermissionMode.YOLO;
+            default: return null;
+        }
     }
 }

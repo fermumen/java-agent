@@ -3,6 +3,7 @@ package dev.fxjava;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.io.IOException;
+import java.util.EnumMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.SynchronousQueue;
 import java.util.function.Supplier;
@@ -12,9 +13,9 @@ import java.util.function.Supplier;
  * session permission rules (denies before allows), then session "always"
  * grants, then hands the request to the raw shell's main loop through a
  * synchronous handoff so only the shell ever reads stdin while generating.
- * With no attached channel (non-TTY or legacy fallback) it delegates
- * byte-identically to the wrapped policy; a policy that already approves
- * everything bypasses rules and grants entirely. Also routes
+ * With no attached channel (non-TTY or legacy fallback) it delegates to the
+ * active mode's wrapped policy. The active YOLO mode bypasses rules and grants;
+ * ASK and AUTO resume their normal checks when selected again. Also routes
  * ask_user_question line input through the same channel.
  */
 final class ApprovalRouter implements ApprovalPolicy {
@@ -72,6 +73,8 @@ final class ApprovalRouter implements ApprovalPolicy {
     private volatile Channel channel;
     private volatile Supplier<SessionRules> rulesSupplier;
     private volatile boolean bypassRules;
+    private volatile PermissionMode permissionMode;
+    private final EnumMap<PermissionMode, ApprovalPolicy> modeFallbacks = new EnumMap<>(PermissionMode.class);
 
     ApprovalRouter(ApprovalPolicy fallback) {
         this(fallback, new SessionApprovals());
@@ -95,13 +98,24 @@ final class ApprovalRouter implements ApprovalPolicy {
     }
 
     /**
-     * Binds the active session's persistent rules; a policy that approves
-     * everything (yolo) passes {@code allowAllPolicy} so it keeps bypassing
-     * every permission check.
+     * Binds the active session's persistent rules. The boolean retains the
+     * legacy static allow-all behavior for routers without a selected mode.
      */
     void bindRules(Supplier<SessionRules> supplier, boolean allowAllPolicy) {
         rulesSupplier = supplier;
         bypassRules = allowAllPolicy;
+    }
+
+    void setModeFallback(PermissionMode mode, ApprovalPolicy policy) {
+        modeFallbacks.put(mode, policy);
+    }
+
+    void setPermissionMode(PermissionMode mode) {
+        permissionMode = mode;
+    }
+
+    PermissionMode permissionMode() {
+        return permissionMode;
     }
 
     int grantCount() {
@@ -118,8 +132,9 @@ final class ApprovalRouter implements ApprovalPolicy {
 
     @Override
     public boolean preflightDeny(Tool tool, JsonNode arguments) {
-        if (bypassRules) return false;
-        Supplier<SessionRules> supplier = bypassRules ? null : rulesSupplier;
+        if (permissionMode == PermissionMode.YOLO) return false;
+        if (permissionMode == null && bypassRules) return false;
+        Supplier<SessionRules> supplier = permissionMode == null && bypassRules ? null : rulesSupplier;
         if (supplier != null) {
             SessionRules active = supplier.get();
             if (active != null) {
@@ -133,7 +148,9 @@ final class ApprovalRouter implements ApprovalPolicy {
 
     @Override
     public boolean approve(Tool tool, JsonNode arguments) {
-        if (bypassRules) return fallback.approve(tool, arguments);
+        PermissionMode mode = permissionMode;
+        if (mode == PermissionMode.YOLO) return true;
+        if (mode == null && bypassRules) return fallback.approve(tool, arguments);
         String preview = ToolPreview.safeText(ApprovalPrompt.flatten(tool.preview(arguments)));
         String canonicalArguments = SessionRules.normalizeArguments(arguments);
         Supplier<SessionRules> supplier = rulesSupplier;
@@ -147,38 +164,62 @@ final class ApprovalRouter implements ApprovalPolicy {
             }
         }
         if (grants.allows(tool.name(), canonicalArguments)) return true;
-        return prompt(tool, arguments, preview, canonicalArguments);
+        Channel active = channel;
+        if (active == null) {
+            ApprovalPolicy modeFallback = mode == null ? null : modeFallbacks.get(mode);
+            return (modeFallback == null ? fallback : modeFallback).approve(tool, arguments);
+        }
+        if (mode == PermissionMode.AUTO) return autoApprove(tool, arguments);
+        return prompt(active, tool, arguments, preview, canonicalArguments);
     }
 
     /** Captures the parent's current deny authority without inheriting allows or grants. */
     ApprovalPolicy childAuthority(SessionRules parentRules) {
         SessionRules projected = parentRules == null ? new SessionRules() : parentRules.denyOnlyCopy();
+        return childAuthority(() -> projected);
+    }
+
+    /** Dynamically follows denies in the child's owning root session. */
+    ApprovalPolicy childAuthority(Supplier<SessionRules> parentRules) {
         return new ApprovalPolicy() {
             @Override
             public boolean preflightDeny(Tool tool, JsonNode arguments) {
-                return projected.decide(tool.name(), SessionRules.normalizeArguments(arguments))
-                        == SessionRules.Decision.DENY;
+                try {
+                    SessionRules active = parentRules.get();
+                    return active != null && active.decide(tool.name(), SessionRules.normalizeArguments(arguments))
+                            == SessionRules.Decision.DENY;
+                } catch (RuntimeException unavailable) {
+                    return true;
+                }
             }
 
             @Override
             public boolean approve(Tool tool, JsonNode arguments) {
                 if (preflightDeny(tool, arguments)) return false;
-                return prompt(tool, arguments,
-                        ToolPreview.safeText(ApprovalPrompt.flatten(tool.preview(arguments))),
+                String preview = ToolPreview.safeText(ApprovalPrompt.flatten(tool.preview(arguments)));
+                Channel active = channel;
+                if (active == null) return fallback.approve(tool, arguments);
+                return ApprovalRouter.this.prompt(active, tool, arguments, preview,
                         SessionRules.normalizeArguments(arguments));
             }
         };
     }
 
-    private boolean prompt(Tool tool, JsonNode arguments, String preview, String canonicalArguments) {
-        Channel active = channel;
-        if (active == null) return fallback.approve(tool, arguments);
+    private boolean prompt(Channel active, Tool tool, JsonNode arguments, String preview, String canonicalArguments) {
         try {
             Request request = new Request(tool.name(), preview, false);
             pending.put(request);
             return settle(request.await(), tool.name(), canonicalArguments);
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    private static boolean autoApprove(Tool tool, JsonNode arguments) {
+        try {
+            return tool.autoApprove(arguments);
+        } catch (Exception invalid) {
             return false;
         }
     }

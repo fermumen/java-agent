@@ -106,22 +106,30 @@ generation. Consultation order wherever approvals are checked is: exact deny
 non-persistent session `always` grants, then the normal prompt flow; yolo
 still bypasses everything. Session `always` grants are cleared only after a
 successful `/new`, `/resume`, or `/recover`; failed transitions retain them.
-Non-yolo subagents capture the owning root session's deny-only projection, so
-they preserve exact denies without inheriting remembered allows or `always`
-grants and do not follow a later root-session switch. Yolo children bypass the
-projection.
+Subagents consult the owning root session's live deny-only rules, so they
+preserve exact denies without inheriting remembered allows or `always` grants
+and do not follow a later root-session switch. The current parent mode clamps
+child approvals dynamically; yolo children bypass the projection only while
+that mode is active.
+
+The interactive shell supports `/permissions ask|auto|yolo` for the current
+run. `/permissions yolo` bypasses approval checks and remembered rules;
+`auto` approves only tools that pass their safe-action check and denies other
+approval-required actions. Switching back to `ask` or `auto` restores checks
+against the active root session's rules. Child approvals follow the current
+parent mode and owning session's denies, so lowering from yolo does not leave
+inherited full privilege in effect. The slash popup completes command tokens before the first space;
+`/permissions ask`, `/permissions auto`, and `/permissions yolo` are listed in
+`/help` and appear as completions. Nested remember/revoke arguments remain
+documented in `/help` and dispatch through `/permissions` in both raw and
+legacy shells. The standalone `permissions` info command has no active saved
+session and therefore reports no rule scope; it does not load global rules.
+ACP permission behavior remains controlled by its own client authorization
+boundary and is not changed by this interactive command.
 
 Deliberate limits: there are no configured global rules, no
 auto-classifier/reviewer, no wildcards or patterns — matching is exact only —
-and no command-prefix admission. The fx-only `/permissions ask|auto|yolo|reset`
-modes are not implemented; mode stays fixed by CLI flag. The current slash
-popup only completes command tokens before the first space, so the nested
-remember/revoke entries appear in `/help` but not in a second-stage popup.
-Typed nested commands still dispatch through `/permissions` in both raw and
-legacy shells. The standalone `permissions` info command has no active saved
-session and therefore reports no rule scope; it does not load global rules.
-ACP rule enforcement is deliberately out of scope, so ACP remains a known
-transport parity gap rather than part of this TUI permission contract.
+and no command-prefix admission.
 
 ## Usage tracking
 

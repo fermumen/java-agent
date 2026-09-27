@@ -110,7 +110,7 @@ public final class Main {
         ObjectMapper json = new ObjectMapper();
         BufferedReader input = new BufferedReader(new InputStreamReader(standardInput));
         ApprovalRouter approval = approvalOverride == null
-                ? new ApprovalRouter(approvalPolicy(config, input, error, console)) : approvalOverride;
+                ? approvalRouter(config, input, error, console) : approvalOverride;
         SessionStore store = options.noSave ? null : new SessionStore(json, sessionRoot);
         ToolResultStore resultStore = new ToolResultStore(sessionRoot);
         Path mcpConfig = options.mcpConfig == null ? sessionRoot.resolve("mcp.json") : Path.of(options.mcpConfig);
@@ -131,15 +131,21 @@ public final class Main {
         try (SubagentManager subagents = new SubagentManager(json, child ->
                 new SubagentAgentRunner(json, config.apiKey(), config.baseUrl(), config.model(),
                         config.workspace(), config.maxSteps(), sessionRoot, childTools,
-                        approval.childAuthority(authorityRules(child, activeSession.get(), store)),
+                        approval.childAuthority(() -> {
+                            try {
+                                return authorityRules(child, activeSession.get(), store);
+                            } catch (IOException unavailable) {
+                                throw new java.io.UncheckedIOException(unavailable);
+                            }
+                        }),
                         error, child,
                         subagentRuntime.get().parentContext(child.id()), config.contextBudget(),
                         () -> {
                             SessionRuntime active = activeSession.get();
                             return active == null ? new ModelSelection(config.model(), config.reasoningEffort())
                                     : active.modelSelection();
-                        }),
-                permissionMode, options.noSave ? null : sessionRoot,
+                        }, approval::permissionMode),
+                approval::permissionMode, options.noSave ? null : sessionRoot,
                 () -> activeSession.get() == null ? null : activeSession.get().id())) {
         subagentRuntime.set(subagents);
         agentTools.add(new SubagentTool(subagents));
@@ -155,6 +161,7 @@ public final class Main {
         }
         if (reasoningEffort != null) session.setReasoningEffort(reasoningEffort);
         approval.bindRules(session::rules, config.approveAll());
+        approval.setPermissionMode(config.permissionMode());
         activeSession.set(session);
         subagents.restore();
 
@@ -241,8 +248,8 @@ public final class Main {
             } else if (isCommand(line, "/permissions")) {
                 PermissionCommands.handle(session,
                         line.substring("/permissions".length()),
-                        config.permissionMode().name().toLowerCase(java.util.Locale.ROOT),
-                        approval.grantCount(), Ansi.of(false), out);
+                        modeLabel(approval, config.permissionMode()), approval.grantCount(),
+                        Ansi.of(false), out, approval::setPermissionMode);
             } else if (isCommand(line, "/stats")) {
                 StatsCommands.handle(session, line.substring("/stats".length()), workspace,
                         Ansi.of(false), out);
@@ -452,10 +459,23 @@ public final class Main {
         }
     }
 
+    private static ApprovalRouter approvalRouter(AgentConfig config, BufferedReader input,
+                                                 PrintStream error, Console console) {
+        ApprovalPolicy ask = approvalPolicy(config, input, error, console, PermissionMode.ASK);
+        ApprovalRouter router = new ApprovalRouter(ask);
+        router.setModeFallback(PermissionMode.ASK, ask);
+        router.setModeFallback(PermissionMode.AUTO,
+                approvalPolicy(config, input, error, console, PermissionMode.AUTO));
+        router.setModeFallback(PermissionMode.YOLO,
+                approvalPolicy(config, input, error, console, PermissionMode.YOLO));
+        router.setPermissionMode(config.permissionMode());
+        return router;
+    }
+
     private static ApprovalPolicy approvalPolicy(AgentConfig config, BufferedReader input,
-                                                   PrintStream error, Console console) {
-        if (config.approveAll()) return (tool, arguments) -> true;
-        if (config.permissionMode() == PermissionMode.AUTO) {
+                                                  PrintStream error, Console console, PermissionMode mode) {
+        if (mode == PermissionMode.YOLO) return (tool, arguments) -> true;
+        if (mode == PermissionMode.AUTO) {
             return (tool, arguments) -> {
                 boolean allowed;
                 try {
@@ -500,6 +520,11 @@ public final class Main {
     private static boolean modelSourceWinsOverSession(String source) {
         return source.equals("--model flag") || source.startsWith("env ")
                 || source.equals("saved preference");
+    }
+
+    private static String modeLabel(ApprovalRouter approval, PermissionMode fallback) {
+        PermissionMode active = approval.permissionMode();
+        return (active == null ? fallback : active).name().toLowerCase(Locale.ROOT);
     }
 
     private static String effortSource(Options options, Map<String, String> environment,
@@ -551,7 +576,6 @@ public final class Main {
     private static SessionRules authorityRules(SubagentManager.ChildConfiguration child,
                                                SessionRuntime active, SessionStore store)
             throws IOException {
-        if (child.permissionMode() == PermissionMode.YOLO) return new SessionRules();
         String ownerId = child.authoritySessionId();
         if (ownerId == null) {
             if (store != null) throw new IOException("Subagent permission authority has no owning session");

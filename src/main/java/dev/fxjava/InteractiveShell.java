@@ -398,7 +398,8 @@ final class InteractiveShell implements QuestionFlow {
                 break;
             case "/permissions":
                 PermissionCommands.handle(session, argumentAfter(line, "/permissions"),
-                        modeLabel(), approvalRouter.grantCount(), ansi, out);
+                        modeLabel(), approvalRouter.grantCount(), ansi, out,
+                        approvalRouter::setPermissionMode);
                 break;
             case "/status":
                 printStatus();
@@ -445,7 +446,8 @@ final class InteractiveShell implements QuestionFlow {
     }
 
     private String modeLabel() {
-        return config.permissionMode().name().toLowerCase(Locale.ROOT);
+        PermissionMode active = approvalRouter.permissionMode();
+        return (active == null ? config.permissionMode() : active).name().toLowerCase(Locale.ROOT);
     }
 
     private static boolean modelSourceWinsOverSession(String source) {

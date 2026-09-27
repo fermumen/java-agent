@@ -30,6 +30,68 @@ class ApprovalRouterTest {
     }
 
     @Test
+    void runtimeYoloBypassesThenRestoresRememberedDeniesAndApprovalChecks() {
+        SessionRules rules = new SessionRules();
+        rules.remember(SessionRules.Kind.DENY, "write_file", "{}");
+        ApprovalRouter router = new ApprovalRouter((asked, arguments) -> false);
+        router.bindRules(() -> rules, false);
+        router.setModeFallback(PermissionMode.ASK, (asked, arguments) -> false);
+        router.setModeFallback(PermissionMode.AUTO, (asked, arguments) -> false);
+        router.setModeFallback(PermissionMode.YOLO, (asked, arguments) -> true);
+        router.setPermissionMode(PermissionMode.ASK);
+
+        assertTrue(router.preflightDeny(tool, toolArguments()));
+        assertFalse(router.approve(tool, toolArguments()));
+        router.setPermissionMode(PermissionMode.YOLO);
+        assertFalse(router.preflightDeny(tool, toolArguments()));
+        assertTrue(router.approve(tool, toolArguments()));
+        router.setPermissionMode(PermissionMode.ASK);
+        assertTrue(router.preflightDeny(tool, toolArguments()),
+                "switching back reactivates the remembered deny rule");
+        assertFalse(router.approve(tool, toolArguments()));
+    }
+
+    @Test
+    void autoModeUsesAutoFallbackAndYoloHasNoApprovalCallback() {
+        AtomicInteger calls = new AtomicInteger();
+        ApprovalRouter router = new ApprovalRouter((asked, arguments) -> false);
+        router.setModeFallback(PermissionMode.AUTO, (asked, arguments) -> {
+            calls.incrementAndGet();
+            return true;
+        });
+        router.setPermissionMode(PermissionMode.AUTO);
+        assertTrue(router.approve(tool, toolArguments()));
+        assertEquals(1, calls.get());
+
+        router.setPermissionMode(PermissionMode.YOLO);
+        assertTrue(router.approve(tool, toolArguments()));
+        assertEquals(1, calls.get(), "YOLO bypasses fallback approval checks");
+    }
+
+    @Test
+    void rawAutoModeDeniesUnsafeActionsWithoutPrompting() {
+        ApprovalRouter router = new ApprovalRouter((asked, arguments) -> false);
+        RecordingChannel channel = new RecordingChannel("yes");
+        router.attach(channel);
+        router.setPermissionMode(PermissionMode.AUTO);
+
+        assertFalse(router.approve(tool, toolArguments()));
+        assertEquals(0, channel.approvals.get(), "AUTO denies unsafe actions rather than asking");
+
+        Tool safe = new Tool() {
+            @Override public String name() { return "safe_read"; }
+            @Override public String description() { return "safe read"; }
+            @Override public ObjectNode parameters() { return new ObjectMapper().createObjectNode(); }
+            @Override public boolean requiresApproval() { return true; }
+            @Override public boolean autoApprove(JsonNode arguments) { return true; }
+            @Override public String preview(JsonNode arguments) { return "safe read"; }
+            @Override public String execute(JsonNode arguments) { return "ok"; }
+        };
+        assertTrue(router.approve(safe, toolArguments()));
+        assertEquals(0, channel.approvals.get(), "safe AUTO approvals also skip the prompt");
+    }
+
+    @Test
     void alwaysReplyGrantsAndSkipsLaterPrompts() throws Exception {
         ApprovalRouter router = new ApprovalRouter((asked, arguments) -> {
             throw new AssertionError("fallback must not run while a channel is attached");

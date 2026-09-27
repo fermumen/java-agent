@@ -57,6 +57,17 @@ class SlashCommandsTest {
     }
 
     @Test
+    void permissionModesAreDiscoverableInHelpAndTabEntries() {
+        String catalog = SlashCommands.catalog("permissions", 100, Ansi.of(false));
+        assertTrue(catalog.contains("/permissions [ask|auto|yolo]"));
+        assertTrue(catalog.contains("/permissions ask"));
+        assertTrue(catalog.contains("/permissions auto"));
+        assertTrue(catalog.contains("/permissions yolo"));
+        assertTrue(SlashCommands.filter("/permissions ").stream()
+                .anyMatch(match -> match.token.equals("/permissions yolo")));
+    }
+
+    @Test
     void catalogGroupsByCategoryWithDimHeaders() {
         String catalog = SlashCommands.catalog(null, 80, Ansi.of(false));
         List<String> lines = List.of(catalog.split("\n", -1));

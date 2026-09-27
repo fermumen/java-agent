@@ -52,6 +52,7 @@ data-processing libraries to JShell without coupling them to the agent runtime.
   cancellation, model/mode configuration, and bounded JSON-RPC framing
 - Read-only `status`, `permissions`, `doctor`, `mcp list`, and paginated `sessions` commands
 - `ask`, conservative `auto`, and unrestricted `yolo` permission modes (`--yes` remains an alias)
+- Interactive `/permissions ask|auto|yolo` switches the active mode for this run; bare `/permissions` shows the mode and remembered rules
 - A bounded agent loop and exact `function_call`/`function_call_output` pairing
 
 ## Build

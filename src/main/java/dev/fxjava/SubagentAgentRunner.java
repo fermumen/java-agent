@@ -25,6 +25,7 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
     private final PrintStream progress;
     private final Agent.ParentContext parentContext;
     private final ContextBudget contextBudget;
+    private final Supplier<PermissionMode> parentPermission;
     private SubagentManager.ChildConfiguration configuration;
     private Agent agent;
 
@@ -63,6 +64,18 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
                         SubagentManager.ChildConfiguration configuration,
                         Agent.ParentContext parentContext, ContextBudget contextBudget,
                         Supplier<ModelSelection> defaultSelection) throws Exception {
+        this(json, apiKey, baseUrl, defaultModel, workspace, maxSteps, sessionRoot, tools,
+                parentApproval, progress, configuration, parentContext, contextBudget,
+                defaultSelection, () -> PermissionMode.YOLO);
+    }
+
+    SubagentAgentRunner(ObjectMapper json, String apiKey, String baseUrl, String defaultModel, Path workspace,
+                        int maxSteps, Path sessionRoot, AtomicReference<List<Tool>> tools,
+                        ApprovalPolicy parentApproval, PrintStream progress,
+                        SubagentManager.ChildConfiguration configuration,
+                        Agent.ParentContext parentContext, ContextBudget contextBudget,
+                        Supplier<ModelSelection> defaultSelection,
+                        Supplier<PermissionMode> parentPermission) throws Exception {
         this.json = json;
         this.apiKey = apiKey;
         this.baseUrl = baseUrl;
@@ -77,6 +90,7 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
         this.progress = progress;
         this.parentContext = parentContext;
         this.contextBudget = contextBudget;
+        this.parentPermission = parentPermission == null ? () -> PermissionMode.YOLO : parentPermission;
         this.configuration = configuration;
         this.agent = build(configuration);
     }
@@ -127,7 +141,7 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
             else childTools.add(tool);
         }
         Agent built = new Agent(json, new OpenAiResponsesClient(json, config), childTools,
-                approval(child.permissionMode(), parentAuthority, progress), progress, maxSteps,
+                approval(child.permissionMode(), parentAuthority, progress, parentPermission), progress, maxSteps,
                 instructionsFor(child, null), results,
                 parentContext, contextBudget);
         built.setToolResultSession(child.id());
@@ -163,17 +177,30 @@ final class SubagentAgentRunner implements SubagentManager.ChildRunner {
     }
 
     static ApprovalPolicy approval(PermissionMode mode, ApprovalPolicy parentAuthority, PrintStream progress) {
-        if (mode == PermissionMode.YOLO) return (tool, arguments) -> true;
-        if (mode == PermissionMode.ASK) return parentAuthority;
+        return approval(mode, parentAuthority, progress, () -> PermissionMode.YOLO);
+    }
+
+    static ApprovalPolicy approval(PermissionMode mode, ApprovalPolicy parentAuthority, PrintStream progress,
+                                   Supplier<PermissionMode> parentPermission) {
         return new ApprovalPolicy() {
+            private PermissionMode effectiveMode() {
+                PermissionMode parent = parentPermission == null ? PermissionMode.ASK : parentPermission.get();
+                if (parent == null) parent = PermissionMode.ASK;
+                return mode.ordinal() > parent.ordinal() ? parent : mode;
+            }
+
             @Override
             public boolean preflightDeny(Tool tool, com.fasterxml.jackson.databind.JsonNode arguments) {
+                if (effectiveMode() == PermissionMode.YOLO) return false;
                 return parentAuthority.preflightDeny(tool, arguments);
             }
 
             @Override
             public boolean approve(Tool tool, com.fasterxml.jackson.databind.JsonNode arguments) {
+                PermissionMode active = effectiveMode();
+                if (active == PermissionMode.YOLO) return true;
                 if (preflightDeny(tool, arguments)) return false;
+                if (active == PermissionMode.ASK) return parentAuthority.approve(tool, arguments);
                 boolean allowed;
                 try { allowed = tool.autoApprove(arguments); }
                 catch (Exception invalid) { allowed = false; }

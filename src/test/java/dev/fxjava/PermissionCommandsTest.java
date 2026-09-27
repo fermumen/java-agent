@@ -13,6 +13,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -68,8 +69,28 @@ class PermissionCommandsTest {
         assertEquals(1, occurrences(output, "Session persistence is disabled by --no-save."));
         assertTrue(output.contains("Usage: /permissions remember"));
         assertTrue(output.contains("Usage: /permissions revoke"));
-        assertTrue(output.contains("Usage: /permissions [remember"));
+        assertTrue(output.contains("Usage: /permissions [ask|auto|yolo"));
         assertFalse(output.contains("Remembered "));
+    }
+
+    @Test
+    void modeSelectorChangesActiveModeAndBareCommandShowsChoices() throws Exception {
+        Path workspace = Files.createDirectory(temporary.resolve("mode-workspace"));
+        SessionRuntime session = runtime(workspace, temporary.resolve("mode-state"));
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        PrintStream out = new PrintStream(bytes, true, StandardCharsets.UTF_8);
+        AtomicReference<PermissionMode> mode = new AtomicReference<>(PermissionMode.ASK);
+
+        PermissionCommands.handle(session, "yolo", "ask", 0, Ansi.of(false), out, mode::set);
+        PermissionCommands.handle(session, "", "yolo", 0, Ansi.of(false), out, mode::set);
+        PermissionCommands.handle(session, "ask", "yolo", 0, Ansi.of(false), out, mode::set);
+
+        assertEquals(PermissionMode.ASK, mode.get());
+        String output = bytes.toString(StandardCharsets.UTF_8);
+        assertTrue(output.contains("YOLO enabled: all tool approvals and remembered permission rules are bypassed"));
+        assertTrue(output.contains("mode=yolo grants=0 rules=0"));
+        assertTrue(output.contains("Usage: /permissions [ask|auto|yolo"));
+        assertTrue(output.contains("Permission mode set to ask."));
     }
 
     @Test
@@ -106,11 +127,17 @@ class PermissionCommandsTest {
                     "test", System::nanoTime);
             shell.dispatch("/permissions\tremember\tdeny write_file {\"path\":\"raw.md\"}");
             shell.dispatch("/permissions");
+            shell.dispatch("/permissions yolo");
+            assertEquals(PermissionMode.YOLO, approval.permissionMode());
+            shell.dispatch("/permissions ask");
+            assertEquals(PermissionMode.ASK, approval.permissionMode());
             shell.dispatch("/permissions revoke 1");
         }
         String output = bytes.toString(StandardCharsets.UTF_8);
         assertTrue(output.contains("Remembered deny rule 1"));
         assertTrue(output.contains("mode=ask grants=0 rules=1"));
+        assertTrue(output.contains("YOLO enabled: all tool approvals"));
+        assertTrue(output.contains("Permission mode set to ask."));
         assertTrue(output.contains("Revoked rule 1."));
     }
 
@@ -153,7 +180,8 @@ class PermissionCommandsTest {
         Path workspace = Files.createDirectory(temporary.resolve("workspace"));
         Path state = temporary.resolve("state");
         String commands = "/permissions\tremember\tallow write_file {\"path\":\"legacy.md\"}\n"
-                + "/permissions\n/permissions revoke 1\n/permissions remember deny write_file nope\n/exit\n";
+                + "/permissions\n/permissions yolo\n/permissions\n/permissions ask\n"
+                + "/permissions revoke 1\n/permissions remember deny write_file nope\n/exit\n";
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         int exit = Main.run(new String[]{"--workspace", workspace.toString(), "--session-root", state.toString()},
                 Map.of("OPENAI_API_KEY", "test-key"),
@@ -165,8 +193,41 @@ class PermissionCommandsTest {
         assertEquals(0, exit);
         assertTrue(output.contains("Remembered allow rule 1"));
         assertTrue(output.contains("mode=ask grants=0 rules=1"));
+        assertTrue(output.contains("YOLO enabled: all tool approvals"));
+        assertTrue(output.contains("mode=yolo grants=0 rules=1"));
+        assertTrue(output.contains("Permission mode set to ask."));
         assertTrue(output.contains("Revoked rule 1."));
         assertTrue(output.contains("Usage: /permissions remember"));
+    }
+
+    @Test
+    void startupYoloCanBeLoweredBackToAskAndApprovalChecksReturn() throws Exception {
+        Path workspace = Files.createDirectory(temporary.resolve("startup-yolo-workspace"));
+        Path state = temporary.resolve("startup-yolo-state");
+        ApprovalRouter approval = new ApprovalRouter((tool, arguments) -> false);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        String commands = "/permissions\n/permissions ask\n/exit\n";
+        int exit = Main.run(new String[]{"--yolo", "--workspace", workspace.toString(),
+                        "--session-root", state.toString()}, Map.of("OPENAI_API_KEY", "test-key"),
+                new ByteArrayInputStream(commands.getBytes(StandardCharsets.UTF_8)),
+                new PrintStream(output, true, StandardCharsets.UTF_8),
+                new PrintStream(PrintStream.nullOutputStream()), approval);
+
+        assertEquals(0, exit);
+        assertTrue(output.toString(StandardCharsets.UTF_8).contains("mode=yolo"));
+        assertEquals(PermissionMode.ASK, approval.permissionMode());
+        Tool guarded = new Tool() {
+            @Override public String name() { return "guarded"; }
+            @Override public String description() { return "guarded test action"; }
+            @Override public com.fasterxml.jackson.databind.node.ObjectNode parameters() {
+                return json.createObjectNode();
+            }
+            @Override public boolean requiresApproval() { return true; }
+            @Override public String preview(com.fasterxml.jackson.databind.JsonNode arguments) { return "guarded"; }
+            @Override public String execute(com.fasterxml.jackson.databind.JsonNode arguments) { return "ok"; }
+        };
+        assertFalse(approval.approve(guarded, json.createObjectNode()),
+                "the original ask fallback is active again after leaving startup YOLO");
     }
 
     @Test
