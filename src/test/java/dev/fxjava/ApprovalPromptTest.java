@@ -79,10 +79,21 @@ class ApprovalPromptTest {
     @Test
     void previewWrapsInsideTheBorder() {
         ApprovalPrompt.render(out, Ansi.of(false), 30, "run", "alpha beta gamma delta epsilon");
-        String[] lines = output().split("\n");
+        String[] lines = output().split("\\R");
         assertTrue(lines.length >= 5, "wrapped body rows expected: " + output());
         assertTrue(lines[2].startsWith("│ alpha beta "));
         assertTrue(lines[3].startsWith("│ "));
+    }
+
+    @Test
+    void longPreviewsCollapseIntoAMutedCountRow() {
+        String script = "word ".repeat(200);
+        ApprovalPrompt.Box box = ApprovalPrompt.render(out, Ansi.of(true), 40, "bsh_run", script);
+        assertEquals(ApprovalPrompt.MAX_PREVIEW_ROWS + 2, box.rows);
+        String countRow = box.lines().get(ApprovalPrompt.MAX_PREVIEW_ROWS);
+        assertTrue(stripSgr(countRow).matches("│ … \\d+ more rows +│"), countRow);
+        assertTrue(countRow.contains("\u001b[38;5;243m"), countRow);
+        for (String line : box.lines()) assertEquals(40, MarkdownConsole.visibleWidth(stripSgr(line)), line);
     }
 
     @Test
@@ -96,7 +107,7 @@ class ApprovalPromptTest {
         ApprovalPrompt.Box box = ApprovalPrompt.render(out, Ansi.of(false), 40, "tool", "preview");
         reset();
         ApprovalPrompt.erase(out, Ansi.of(false), box);
-        assertEquals("\u001b[3A\r\u001b[2K\n\r\u001b[2K\n\r\u001b[2K\r\u001b[2K",
+        assertEquals("\u001b[3A\r\u001b[2K\n\r\u001b[2K\n\r\u001b[2K\r\u001b[2K\u001b[3A\r",
                 output());
     }
 

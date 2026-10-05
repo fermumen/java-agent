@@ -71,7 +71,8 @@ final class TerminalTool implements Tool {
     @Override public String description() {
         return "Execute captured commands or manage bounded background terminal processes. "
                 + "Pure Java provides process pipes and bounded plain-output screens; "
-                + "full PTY/ANSI screens and restart persistence remain unavailable.";
+                + "full PTY/ANSI screens and restart persistence remain unavailable. "
+                + WorkspaceTools.MINIMAL_HOST;
     }
 
     @Override public ObjectNode parameters() { return parameters; }

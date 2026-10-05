@@ -51,16 +51,12 @@ import org.knowm.xchart.BitmapEncoder.BitmapFormat;
 /** Fail-closed deterministic checks for the shaded productivity bundle. */
 public final class ProductivitySmoke {
     private static final String PASS_LINE = "productivity bundle smoke test passed";
+    private static final String BSH_PASS_LINE = "beanshell smoke script passed";
     private static final String FAILURE_SENTINEL = "intentional productivity smoke failure sentinel";
 
     private ProductivitySmoke() { }
 
     public static void main(String[] args) throws Exception {
-        if (args.length > 0 && args[0].equals("--intentional-failure")) {
-            throw new AssertionError(FAILURE_SENTINEL);
-        }
-        if (args.length == 0) throw new IllegalArgumentException("source file path is required");
-
         require("&lt;x&gt;".equals(StringEscapeUtils.escapeHtml4("<x>")), "Commons Text unavailable");
         require(DigestUtils.sha256Hex("agent").length() == 64, "Commons Codec unavailable");
         require(new DescriptiveStatistics(new double[] {1, 2, 3}).getMean() == 2.0,
@@ -81,7 +77,7 @@ public final class ProductivitySmoke {
             validateCsv(artifacts.resolve("roundtrip.csv"));
             validateChart(artifacts.resolve("chart.png"));
             validateImageIoServiceMetadata();
-            validateAssertionFailureIsNonzero(Path.of(args[0]));
+            validateBeanShellRunner(artifacts);
         } finally {
             deleteTree(artifacts);
         }
@@ -200,26 +196,87 @@ public final class ProductivitySmoke {
         require(twelveMonkeys, "TwelveMonkeys ImageIO service metadata was not preserved");
     }
 
-    private static void validateAssertionFailureIsNonzero(Path sourceFile) throws Exception {
+    private static void validateBeanShellRunner(Path directory) throws Exception {
+        Path workbook = directory.resolve("bsh-roundtrip.xlsx");
+        Path passing = directory.resolve("passing.bsh");
+        Files.writeString(passing, String.join("\n",
+                "import java.io.*;",
+                "import java.util.*;",
+                "import org.apache.poi.xssf.usermodel.XSSFWorkbook;",
+                "File file = new File(bsh.args[0]);",
+                "XSSFWorkbook workbook = new XSSFWorkbook();",
+                "try {",
+                "    workbook.createSheet(\"data\").createRow(0).createCell(0).setCellValue(\"ready\");",
+                "    FileOutputStream out = new FileOutputStream(file);",
+                "    try { workbook.write(out); } finally { out.close(); }",
+                "} finally { workbook.close(); }",
+                "List values = new ArrayList();",
+                "FileInputStream in = new FileInputStream(file);",
+                "try {",
+                "    XSSFWorkbook reopened = new XSSFWorkbook(in);",
+                "    values.add(reopened.getSheet(\"data\").getRow(0).getCell(0).getStringCellValue());",
+                "    reopened.close();",
+                "} finally { in.close(); }",
+                "if (!\"ready\".equals(values.get(0))) throw new IllegalStateException(\"workbook did not round-trip\");",
+                "for (Object value : values) print(\"" + BSH_PASS_LINE + " \" + value);",
+                ""), StandardCharsets.UTF_8);
+        BeanShellRun ok = runBeanShell(passing, workbook.toString());
+        require(ok.exit == 0, "passing BeanShell script failed: " + ok.output);
+        require(ok.output.contains(BSH_PASS_LINE + " ready"), "BeanShell output missing: " + ok.output);
+        require(Files.size(workbook) > 0, "BeanShell script did not write its workbook");
+
+        Path bom = directory.resolve("bom.bsh");
+        Files.writeString(bom, "\uFEFFprint(\"bom ok\");\n", StandardCharsets.UTF_8);
+        BeanShellRun bomRun = runBeanShell(bom);
+        require(bomRun.exit == 0 && bomRun.output.contains("bom ok"), "BOM script failed: " + bomRun.output);
+
+        Path throwing = directory.resolve("throwing.bsh");
+        Files.writeString(throwing, "print(\"before\");\nthrow new IllegalStateException(\"" + FAILURE_SENTINEL
+                + "\");\nprint(\"" + BSH_PASS_LINE + "\");\n", StandardCharsets.UTF_8);
+        BeanShellRun thrown = runBeanShell(throwing);
+        require(thrown.exit != 0, "throwing BeanShell script exited successfully: " + thrown.output);
+        require(thrown.output.contains(FAILURE_SENTINEL), "script exception was not reported: " + thrown.output);
+        require(!thrown.output.contains(BSH_PASS_LINE), "script kept running after an exception");
+
+        Path syntax = directory.resolve("syntax.bsh");
+        Files.writeString(syntax, "int x = ;\n", StandardCharsets.UTF_8);
+        require(runBeanShell(syntax).exit != 0, "BeanShell parse error exited successfully");
+
+        Path undefined = directory.resolve("undefined.bsh");
+        Files.writeString(undefined, "noSuchVariable.call();\n", StandardCharsets.UTF_8);
+        require(runBeanShell(undefined).exit != 0, "BeanShell evaluation error exited successfully");
+
+        require(runBeanShell(directory.resolve("missing.bsh")).exit != 0, "missing BeanShell script exited successfully");
+    }
+
+    private static BeanShellRun runBeanShell(Path script, String... scriptArgs) throws Exception {
         Path java = Path.of(System.getProperty("java.home"), "bin",
                 System.getProperty("os.name", "").toLowerCase().contains("win") ? "java.exe" : "java");
-        Path log = Files.createTempFile("java-agent-productivity-smoke-child-", ".log");
+        Path log = Files.createTempFile("java-agent-productivity-smoke-bsh-", ".log");
         try {
-            Process child = new ProcessBuilder(java.toString(), "--class-path", System.getProperty("java.class.path"),
-                    sourceFile.toAbsolutePath().toString(), "--intentional-failure")
+            var command = new java.util.ArrayList<String>(Arrays.asList(java.toString(), "-jar",
+                    System.getProperty("java.class.path"), script.toAbsolutePath().toString()));
+            command.addAll(Arrays.asList(scriptArgs));
+            Process child = new ProcessBuilder(command)
                     .redirectErrorStream(true).redirectOutput(log.toFile()).start();
-            if (!child.waitFor(30, TimeUnit.SECONDS)) {
+            if (!child.waitFor(60, TimeUnit.SECONDS)) {
                 child.destroyForcibly();
                 child.waitFor(5, TimeUnit.SECONDS);
-                throw new AssertionError("source-file smoke child did not exit");
+                throw new AssertionError("BeanShell smoke child did not exit: " + script.getFileName());
             }
-            String output = Files.readString(log, StandardCharsets.UTF_8);
-            require(child.exitValue() != 0, "intentional assertion failure exited successfully");
-            require(output.contains(FAILURE_SENTINEL),
-                    "intentional failure did not reach the process boundary: " + output);
-            require(!output.contains(PASS_LINE), "a failed smoke child printed its success line");
+            return new BeanShellRun(child.exitValue(), Files.readString(log, StandardCharsets.UTF_8));
         } finally {
             Files.deleteIfExists(log);
+        }
+    }
+
+    private static final class BeanShellRun {
+        final int exit;
+        final String output;
+
+        BeanShellRun(int exit, String output) {
+            this.exit = exit;
+            this.output = output;
         }
     }
 

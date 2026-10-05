@@ -25,12 +25,19 @@ of the full-screen manager.
   `^C cancelled`; otherwise it clears the draft once, and a second press
   within 1.5 s exits the shell.
 - Welcome and status chrome: a bold two-line welcome (version, model,
-  workspace, session id over a dim key-hint row) and a dim status hint above
-  the prompt showing model, permission mode, and a truncated session id.
-- Transcript rendering: braille spinner with elapsed seconds while nothing new
-  shows, live tool-group lines rewritten in place from a running dot to a
-  check or cross plus dim preview, and assistant text rendered block-by-block
-  as complete lines arrive.
+  workspace, session id over a dim key-hint row), a rounded muted border
+  around the composer (cyan `›` chevron, hanging indent on wrapped rows, a
+  muted placeholder while empty, one column short of the margin), and a dim
+  status hint beneath it showing model, permission mode, and a truncated
+  session id; the slash menu opens between the box and the hint.
+- Transcript rendering: a braille spinner plus a `Thinking…` label (or
+  `Compacting…`) whose letters shimmer under a bright band sweeping across
+  muted 256-color grays, with elapsed seconds; live tool-group lines rewritten
+  in place from a muted running dot to a check or cross, keeping the muted
+  preview and adding the tool's duration; assistant text rendered
+  block-by-block as complete lines arrive; and a compact muted usage line
+  after each turn (`↑ 1.2k ↓ 340 · 12s`). The line-mode loop keeps its plain
+  `tokens:` line for scripts.
 - Markdown subset: bold ATX headings, fenced code between dim rules with a
   right-aligned language label, colored inline code, bold/italic spans that
   compose so emphasis nests inside list items and table cells, hanging-indent
@@ -43,7 +50,8 @@ of the full-screen manager.
   Shift+Tab cycle, Enter completes without submitting, Esc dismisses until
   the next edit; `/help [query]` prints the wrapped command catalog.
 - Approval flow: external reads, mutations, opens, and commands render as a
-  bordered inline box with `y/n/a` keys, Esc or Enter denying; `always`
+  bordered inline box with `y/n/a` keys, Esc or Enter denying; previews
+  longer than six wrapped rows show five and a muted `… N more rows` line; `always`
   grants are session-scoped memory keyed by tool plus normalized preview and
   never persist beyond the process.
 - ask_user_question panels: bold question text, numbered options with dim

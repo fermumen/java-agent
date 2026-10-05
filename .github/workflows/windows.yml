@@ -23,4 +23,7 @@ jobs:
           path: |
             target/java-agent.jar
             target/productivity.jar
+            java-agent.cmd
+            launch-java-agent.ps1
+            install-user-path.ps1
           if-no-files-found: error

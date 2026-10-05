@@ -18,7 +18,7 @@ class ToolGroupLinesTest {
 
     @Test
     void completedLineRewritesWithCheckOrCross() {
-        assertEquals("\u001b[32m✓\u001b[0m write_file",
+        assertEquals("\u001b[32m✓\u001b[0m \u001b[38;5;248mwrite_file\u001b[0m",
                 ToolGroupLines.completed("write_file", "", false, 40, color));
         assertEquals("✗ echo",
                 ToolGroupLines.completed("echo", "", true, 40, plain));
@@ -49,6 +49,14 @@ class ToolGroupLinesTest {
     @Test
     void completedKeepsErrorPreviewDim() {
         String line = ToolGroupLines.completed("echo", "boom", true, 40, color);
-        assertEquals("\u001b[31m✗\u001b[0m echo \u001b[2mboom\u001b[0m", line);
+        assertEquals("\u001b[31m✗\u001b[0m \u001b[38;5;248mecho\u001b[0m \u001b[38;5;243mboom\u001b[0m",
+                line);
+    }
+
+    @Test
+    void elapsedSuffixSurvivesPreviewTruncation() {
+        String line = ToolGroupLines.completed("bash", "x".repeat(80), "1.2s", false, 30, plain);
+        assertTrue(line.endsWith("… · 1.2s"), line);
+        assertTrue(MarkdownConsole.visibleWidth(line) <= 30);
     }
 }

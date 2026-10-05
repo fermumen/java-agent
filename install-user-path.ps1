@@ -1,9 +1,14 @@
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = $PSScriptRoot
-$sourceJar = Join-Path $repoRoot 'target\java-agent.jar'
+# A downloaded distribution has the jars beside this script; a checkout has them in target.
+$jarRoot = $repoRoot
+if (-not (Test-Path -LiteralPath (Join-Path $jarRoot 'java-agent.jar') -PathType Leaf)) {
+    $jarRoot = Join-Path $repoRoot 'target'
+}
+$sourceJar = Join-Path $jarRoot 'java-agent.jar'
 if (-not (Test-Path -LiteralPath $sourceJar -PathType Leaf)) {
-    [Console]::Error.WriteLine('java-agent: target\java-agent.jar is missing. Build the project with Maven first.')
+    [Console]::Error.WriteLine('java-agent: java-agent.jar was not found beside this script or in target. Build the project with Maven first.')
     exit 2
 }
 if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
@@ -17,7 +22,7 @@ Copy-Item -LiteralPath (Join-Path $repoRoot 'java-agent.cmd') -Destination (Join
 Copy-Item -LiteralPath (Join-Path $repoRoot 'launch-java-agent.ps1') -Destination (Join-Path $installRoot 'launch-java-agent.ps1') -Force
 Copy-Item -LiteralPath $sourceJar -Destination (Join-Path $installRoot 'java-agent.jar') -Force
 
-$sourceProductivity = Join-Path $repoRoot 'target\productivity.jar'
+$sourceProductivity = Join-Path $jarRoot 'productivity.jar'
 $installedProductivity = Join-Path $installRoot 'productivity.jar'
 if (Test-Path -LiteralPath $sourceProductivity -PathType Leaf) {
     Copy-Item -LiteralPath $sourceProductivity -Destination $installedProductivity -Force

@@ -18,6 +18,9 @@ final class Ansi {
     static final String CYAN = "6";
     static final String WHITE = "7";
 
+    static final int MUTED = 11;
+    static final int SUBTLE = 16;
+
     private final boolean colorEnabled;
 
     private Ansi(boolean colorEnabled) {
@@ -51,6 +54,16 @@ final class Ansi {
 
     String italic() {
         return sgr("3");
+    }
+
+    /** 256-color grayscale ramp, 0 (near black) through 23 (near white). */
+    String gray(int level) {
+        return sgr("38;5;" + (232 + Math.max(0, Math.min(23, level))));
+    }
+
+    /** Low-contrast foreground for secondary chrome: tool lines, usage, timers. */
+    String muted() {
+        return gray(MUTED);
     }
 
     String reset() {

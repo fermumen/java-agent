@@ -8,7 +8,9 @@ Completions transport.
 The executable agent's only runtime dependency is Jackson for JSON. HTTP uses
 the JDK client, so standard corporate JVM proxy and trust-store settings
 continue to apply. A separately built productivity JAR provides document and
-data-processing libraries to JShell without coupling them to the agent runtime.
+data-processing libraries and a BeanShell script runner without coupling them
+to the agent runtime, so scripted work runs on a plain JRE without `jshell` or
+`javac`.
 
 ## Features
 
@@ -40,6 +42,11 @@ data-processing libraries to JShell without coupling them to the agent runtime.
   filtered updates, prompts, completion, strict validation, health policy,
   atomic local config reload, and no-auth status reporting
 - Captured `run_command` execution with a timeout and bounded output
+- `beanshell` tool that runs inline or `.bsh` scripts against the productivity
+  bundle on a plain JRE, with BeanShell syntax limits in its description
+- `run_command` and `terminal` descriptions warn that the production Windows
+  host has no developer tools (git, rg, curl, Python) and possibly restricted
+  PowerShell, and point to the file tools and `beanshell`
 - FX-shaped `terminal` actions for captured exec, bounded background-process
   lifecycles, plain-output screen snapshots, and process-lifetime monitors
 - Optional OpenAI-hosted Responses web search (`--web-search`)
@@ -79,17 +86,17 @@ java-agent.jar
 productivity.jar
 ```
 
-The agent's system prompt supplies that absolute path and directs artifact
-creation through reusable Java source-file programs, with JShell available for
-exploration. Override the location with
-`JAVA_AGENT_PRODUCTIVITY_JAR` when the files cannot be colocated. For example:
+The agent's `beanshell` tool runs scripts through the bundle's fail-closed
+runner in a child JVM that uses the agent's own Java runtime; it needs
+approval like `run_command`. Override the bundle location with
+`JAVA_AGENT_PRODUCTIVITY_JAR` when the files cannot be colocated. The runner can
+also be used directly:
 
 ```sh
-jshell --class-path "target/productivity.jar" script.jsh
-java --class-path "target/productivity.jar" Script.java
+java -jar "target/productivity.jar" report.bsh input.xlsx
 ```
 
-The bundle contains Apache POI, PDFBox, Tika Core, Commons CSV/IO/Compress/Lang/
+The bundle contains BeanShell 2.0b6, Apache POI, PDFBox, Tika Core, Commons CSV/IO/Compress/Lang/
 Text/Codec/Math, Jackson JSON and YAML, jsoup, commonmark with GFM tables,
 selected TwelveMonkeys ImageIO plugins, XZ, and XChart. It intentionally omits
 native/JNI dependencies and Tika's full parser package.
@@ -104,10 +111,16 @@ mvn package
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-user-path.ps1
 ```
 
-The installer copies the launcher and jar to `%LOCALAPPDATA%\java-agent\bin`
-and adds that directory to your user PATH. Open a new terminal afterward.
+The installer copies the launcher and jars to `%LOCALAPPDATA%\java-agent\bin`
+and adds that directory to your user PATH. It also works from an unzipped CI
+artifact, which ships the jars beside `install-user-path.ps1`. Open a new terminal afterward.
 The `.cmd` launcher uses PowerShell's process-only execution-policy bypass; it
-does not change a saved policy. Enforced Group Policy or AppLocker rules can
+does not change a saved policy. It also switches the console to UTF-8 for the
+run and restores the previous code page on exit, because some JREs (for
+example IBM Semeru) otherwise write the ANSI code page to an OEM-code-page
+console and garble non-ASCII output. Set `JAVA_AGENT_CONSOLE_UTF8=0` to skip
+this. When running `java -jar` directly on such a JRE, run `chcp 65001` first
+and pass `-Dfile.encoding=UTF-8`. Enforced Group Policy or AppLocker rules can
 still block execution. The command keeps the calling directory as the
 workspace, so `java-agent ask "Inspect this folder"` works from any directory;
 use `--workspace` to select another one.
@@ -174,6 +187,30 @@ Permit file mutations and shell commands without interactive confirmation:
 ```sh
 java -jar target/java-agent.jar --yes "Fix the failing tests"
 ```
+
+On Windows the agent uses the system proxy (`java.net.useSystemProxies=true`)
+and trusts the Windows certificate store (`javax.net.ssl.trustStoreType=Windows-ROOT`),
+so corporate proxies and TLS-inspecting gateways work without extra flags.
+Explicit `-Dhttps.proxyHost`, `-Djava.net.useSystemProxies`,
+`-Djavax.net.ssl.trustStore`, or `-Djavax.net.ssl.trustStoreType` settings take
+precedence. Set `JAVA_AGENT_SYSTEM_NETWORK=0` to keep the JDK defaults.
+
+Azure OpenAI works through its v1 endpoint; use the deployment name as the model.
+Save the endpoint once in `user-settings.json`, or set it per terminal:
+
+```powershell
+java-agent config set base-url https://<resource>.openai.azure.com/openai/v1
+java-agent config show      # endpoint, its source, and whether a key is saved (never the key)
+java-agent config unset base-url
+$env:OPENAI_BASE_URL="https://<resource>.openai.azure.com/openai/v1"
+$env:OPENAI_MODEL="<deployment-name>"
+```
+
+The base URL precedence is `--base-url`, `OPENAI_BASE_URL`, `JAVA_AGENT_BASE_URL`,
+the saved `base_url`, then `https://api.openai.com/v1`. URLs with a query string
+(such as the legacy Azure `?api-version=` form) are rejected. The first-run key
+prompt also asks for the base URL when none is configured, and saves it with
+the key on an explicit yes. The startup banner shows the endpoint host.
 
 Choose a model or an approved corporate OpenAI API proxy:
 

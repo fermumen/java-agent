@@ -621,7 +621,7 @@ public final class Agent {
     }
 
     public static String defaultSystemPrompt(AgentConfig config) {
-        String productivityJar = productivityJar();
+        String productivityJar = productivityJar().toString();
         return String.format(
                 "You are a coding agent working in a local repository. Work autonomously toward the user's request.\n"
                         + "Inspect relevant files before changing them. Keep edits focused, preserve existing work, and verify changes.\n"
@@ -646,35 +646,33 @@ public final class Agent {
                         + "- TwelveMonkeys ImageIO: enhanced JPEG, TIFF, BMP, and PSD support through ImageIO.\n"
                         + "- XChart: line, scatter, bar, histogram, pie, heatmap, and box charts with image export.\n"
                         + "For artifact-producing Office, PDF, CSV, JSON/YAML, HTML, Markdown, archive, image, chart,\n"
-                        + "text, codec, math, and similar tasks, prefer a reusable Java source-file program. Uncaught\n"
-                        + "exceptions produce a failing process status; after writing an artifact, reopen it and assert its\n"
-                        + "contents or structure. Run it with `java --class-path \"%s\" Script.java`. Use JShell for\n"
-                        + "exploration, or only when the snippet explicitly reports failures and validates its outputs. The\n"
-                        + "production shell is Windows\n"
-                        + "cmd.exe; tests may run in a Linux shell. Quote the JAR and script paths, use the host's path syntax,\n"
+                        + "text, codec, math, and similar tasks, use the beanshell tool; its description lists the\n"
+                        + "BeanShell syntax limits. jshell, javac, and `java Script.java` are unavailable. The production\n"
+                        + "host is Windows cmd.exe with no developer tools (no git, rg, grep, curl, or Python) and possibly\n"
+                        + "restricted PowerShell; tests may run in a Linux shell. Prefer the file tools over shell commands,\n"
                         + "and do not assume Unix commands exist on Windows. Do not download dependencies at runtime.\n"
                         + "\n"
                         + "Workspace: %s\n"
                         + "Permission mode: %s\n"
                         + "Current date: %s\n",
-                productivityJar, productivityJar, config.workspace(),
+                productivityJar, config.workspace(),
                 config.permissionMode().name().toLowerCase(java.util.Locale.ROOT), LocalDate.now());
     }
 
-    private static String productivityJar() {
+    static Path productivityJar() {
         String configured = System.getenv("JAVA_AGENT_PRODUCTIVITY_JAR");
-        if (configured != null && !configured.isBlank()) return Path.of(configured).toAbsolutePath().normalize().toString();
+        if (configured != null && !configured.isBlank()) return Path.of(configured).toAbsolutePath().normalize();
         try {
             Path location = Path.of(Agent.class.getProtectionDomain().getCodeSource().getLocation().toURI());
             Path directory = location.getParent();
             Path colocated = directory.resolve("productivity.jar").toAbsolutePath().normalize();
-            if (Files.exists(colocated)) return colocated.toString();
+            if (Files.exists(colocated)) return colocated;
             Path project = directory.getFileName().toString().equals("target") ? directory.getParent() : directory;
             Path development = project.resolve("productivity").resolve("target")
                     .resolve("productivity.jar").toAbsolutePath().normalize();
-            return Files.exists(development) ? development.toString() : colocated.toString();
+            return Files.exists(development) ? development : colocated;
         } catch (URISyntaxException | RuntimeException unavailable) {
-            return Path.of("productivity.jar").toAbsolutePath().normalize().toString();
+            return Path.of("productivity.jar").toAbsolutePath().normalize();
         }
     }
 
