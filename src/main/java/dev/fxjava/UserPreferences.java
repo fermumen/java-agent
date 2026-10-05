@@ -43,23 +43,25 @@ final class UserPreferences {
     private final String apiKey;
     private final String model;
     private final String reasoningEffort;
+    private final String baseUrl;
 
-    private UserPreferences(Path root, String apiKey, String model, String reasoningEffort) {
+    private UserPreferences(Path root, String apiKey, String model, String reasoningEffort, String baseUrl) {
         this.root = root.toAbsolutePath().normalize();
         this.apiKey = apiKey;
         this.model = model;
         this.reasoningEffort = reasoningEffort;
+        this.baseUrl = baseUrl;
     }
 
     static UserPreferences empty(Path root) {
-        return new UserPreferences(root, null, null, null);
+        return new UserPreferences(root, null, null, null, null);
     }
 
     static UserPreferences load(Path root) throws IOException {
         Path absoluteRoot = root.toAbsolutePath().normalize();
         Path file = absoluteRoot.resolve("user-settings.json");
         if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
-            return new UserPreferences(absoluteRoot, null, null, null);
+            return new UserPreferences(absoluteRoot, null, null, null, null);
         }
         if (Files.isSymbolicLink(file) || !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("settings file is not a regular file");
@@ -85,24 +87,30 @@ final class UserPreferences {
         return new UserPreferences(absoluteRoot,
                 boundedText(parsed, "api_key", 8192),
                 boundedText(parsed, "model", 256),
-                boundedText(parsed, "reasoning_effort", 64));
+                boundedText(parsed, "reasoning_effort", 64),
+                boundedText(parsed, "base_url", 2048));
     }
 
     String apiKey() { return apiKey; }
     String model() { return model; }
     String reasoningEffort() { return reasoningEffort; }
+    String baseUrl() { return baseUrl; }
     Path file() { return root.resolve("user-settings.json"); }
 
     UserPreferences withApiKey(String value) {
-        return new UserPreferences(root, nonBlank(value), model, reasoningEffort);
+        return new UserPreferences(root, nonBlank(value), model, reasoningEffort, baseUrl);
     }
 
     UserPreferences withModel(String value) {
-        return new UserPreferences(root, apiKey, nonBlank(value), reasoningEffort);
+        return new UserPreferences(root, apiKey, nonBlank(value), reasoningEffort, baseUrl);
     }
 
     UserPreferences withReasoningEffort(String value) {
-        return new UserPreferences(root, apiKey, model, nonBlank(value));
+        return new UserPreferences(root, apiKey, model, nonBlank(value), baseUrl);
+    }
+
+    UserPreferences withBaseUrl(String value) {
+        return new UserPreferences(root, apiKey, model, reasoningEffort, nonBlank(value));
     }
 
     void save() throws IOException {
@@ -113,6 +121,7 @@ final class UserPreferences {
         if (apiKey != null) document.put("api_key", apiKey);
         if (model != null) document.put("model", model);
         if (reasoningEffort != null) document.put("reasoning_effort", reasoningEffort);
+        if (baseUrl != null) document.put("base_url", baseUrl);
         byte[] contents = JSON.writeValueAsBytes(document);
 
         Path temporary = null;

@@ -195,12 +195,22 @@ Explicit `-Dhttps.proxyHost`, `-Djava.net.useSystemProxies`,
 `-Djavax.net.ssl.trustStore`, or `-Djavax.net.ssl.trustStoreType` settings take
 precedence. Set `JAVA_AGENT_SYSTEM_NETWORK=0` to keep the JDK defaults.
 
-Azure OpenAI works through its v1 endpoint; use the deployment name as the model:
+Azure OpenAI works through its v1 endpoint; use the deployment name as the model.
+Save the endpoint once in `user-settings.json`, or set it per terminal:
 
 ```powershell
+java-agent config set base-url https://<resource>.openai.azure.com/openai/v1
+java-agent config show      # endpoint, its source, and whether a key is saved (never the key)
+java-agent config unset base-url
 $env:OPENAI_BASE_URL="https://<resource>.openai.azure.com/openai/v1"
 $env:OPENAI_MODEL="<deployment-name>"
 ```
+
+The base URL precedence is `--base-url`, `OPENAI_BASE_URL`, `JAVA_AGENT_BASE_URL`,
+the saved `base_url`, then `https://api.openai.com/v1`. URLs with a query string
+(such as the legacy Azure `?api-version=` form) are rejected. The first-run key
+prompt also asks for the base URL when none is configured, and saves it with
+the key on an explicit yes. The startup banner shows the endpoint host.
 
 Choose a model or an approved corporate OpenAI API proxy:
 

@@ -64,8 +64,10 @@ public final class Main {
         Console console = System.console();
         String apiKey = firstNonBlank(environment.get("OPENAI_API_KEY"),
                 environment.get("JAVA_AGENT_API_KEY"), preferences.apiKey());
+        String configuredBaseUrl = configuredBaseUrl(options, environment, preferences);
+        String onboardedBaseUrl = null;
         if (apiKey == null && console != null && !options.json) {
-            apiKey = ApiKeyOnboarding.request(new ApiKeyOnboarding.Prompt() {
+            ApiKeyOnboarding.Credentials credentials = ApiKeyOnboarding.request(new ApiKeyOnboarding.Prompt() {
                 @Override public char[] readPassword(String prompt) {
                     return console.readPassword("%s", prompt);
                 }
@@ -73,14 +75,23 @@ public final class Main {
                 @Override public String readLine(String prompt) {
                     return console.readLine("%s", prompt);
                 }
-            }, preferences, error);
+            }, preferences, error, configuredBaseUrl == null);
+            if (credentials != null) {
+                apiKey = credentials.apiKey;
+                onboardedBaseUrl = credentials.baseUrl;
+            }
         }
         if (apiKey == null) {
             error.println("java-agent: set OPENAI_API_KEY (or JAVA_AGENT_API_KEY), or run interactively without --json to enter one.");
             return 2;
         }
-        String baseUrl = firstNonBlank(options.baseUrl, environment.get("OPENAI_BASE_URL"),
-                environment.get("JAVA_AGENT_BASE_URL"), "https://api.openai.com/v1");
+        String baseUrl;
+        try {
+            baseUrl = BaseUrl.validate(firstNonBlank(configuredBaseUrl, onboardedBaseUrl, BaseUrl.DEFAULT));
+        } catch (IllegalArgumentException invalidBaseUrl) {
+            error.println("java-agent: " + invalidBaseUrl.getMessage());
+            return 2;
+        }
         String model = firstNonBlank(options.model, environment.get("OPENAI_MODEL"),
                 environment.get("JAVA_AGENT_MODEL"), preferences.model(), "gpt-5.6");
         String reasoningEffort;
@@ -187,7 +198,7 @@ public final class Main {
         }
         String activeModelSource = modelSource(options, environment, preferences, options.resume);
         String activeEffortSource = effortSource(options, environment, preferences);
-        out.println("java-agent " + VERSION + " | Responses API | " + session.model()
+        out.println("java-agent " + VERSION + " | " + endpointHost(config.baseUrl()) + " | " + session.model()
                 + " | " + config.workspace());
         if (session.id() != null) out.println("Session: " + session.id());
         out.println("Enter a request. Commands: /new, /clear, /sessions, /resume <id|last>, /recover <id>, /rename <title>, /model, /effort, /permissions, /stats, /compact, /image <path>, /mcp list, /exit");
@@ -285,8 +296,14 @@ public final class Main {
         UserPreferences preferences = loadPreferences(sessionRoot, error);
         String apiKey = firstNonBlank(environment.get("OPENAI_API_KEY"), environment.get("JAVA_AGENT_API_KEY"),
                 preferences.apiKey());
-        String baseUrl = firstNonBlank(options.baseUrl, environment.get("OPENAI_BASE_URL"),
-                environment.get("JAVA_AGENT_BASE_URL"), "https://api.openai.com/v1");
+        String baseUrl;
+        try {
+            baseUrl = BaseUrl.validate(firstNonBlank(configuredBaseUrl(options, environment, preferences),
+                    BaseUrl.DEFAULT));
+        } catch (IllegalArgumentException invalidBaseUrl) {
+            error.println("java-agent: " + invalidBaseUrl.getMessage());
+            return 2;
+        }
         String model = firstNonBlank(options.model, environment.get("OPENAI_MODEL"),
                 environment.get("JAVA_AGENT_MODEL"), preferences.model(), "gpt-5.6");
         String reasoningEffort;
@@ -329,6 +346,9 @@ public final class Main {
                 result.put("version", VERSION).put("workspace", workspace.toAbsolutePath().normalize().toString())
                         .put("model", firstNonBlank(options.model, environment.get("OPENAI_MODEL"),
                                 environment.get("JAVA_AGENT_MODEL"), preferences.model(), "gpt-5.6"))
+                        .put("base_url", firstNonBlank(configuredBaseUrl(options, environment, preferences),
+                                BaseUrl.DEFAULT))
+                        .put("base_url_source", baseUrlSource(options, environment, preferences))
                         .put("transport", "responses").put("gateway", false)
                         .put("permission_mode", mode.name().toLowerCase(java.util.Locale.ROOT))
                         .put("sandbox", "none")
@@ -391,6 +411,42 @@ public final class Main {
                         : Path.of(configured);
                 Path workspace = options.workspace == null ? Path.of("") : Path.of(options.workspace);
                 SkillsCommand.populate(result, options.prompt, workspace, root, json);
+                break;
+            }
+            case "config": {
+                Path root = sessionRoot(options, environment);
+                String[] words = options.prompt.trim().isEmpty() ? new String[0] : options.prompt.trim().split("\\s+");
+                String usage = "Usage: config [show] | config set base-url <url> | config unset base-url";
+                if (words.length == 0 || (words.length == 1 && words[0].equals("show"))) {
+                    UserPreferences saved = loadPreferences(root, error);
+                    result.put("file", saved.file().toString())
+                            .put("api_key", saved.apiKey() == null ? "not saved" : "saved")
+                            .put("base_url", firstNonBlank(configuredBaseUrl(options, environment, saved), BaseUrl.DEFAULT))
+                            .put("base_url_source", baseUrlSource(options, environment, saved));
+                    if (saved.baseUrl() != null) result.put("saved_base_url", saved.baseUrl());
+                    if (saved.model() != null) result.put("saved_model", saved.model());
+                    if (saved.reasoningEffort() != null) result.put("saved_reasoning_effort", saved.reasoningEffort());
+                    break;
+                }
+                boolean set = words.length == 3 && words[0].equals("set") && words[1].equals("base-url");
+                boolean unset = words.length == 2 && words[0].equals("unset") && words[1].equals("base-url");
+                if (!set && !unset) throw new IllegalArgumentException(usage);
+                // Load strictly: never rewrite a settings file (and its saved key) that could not be read.
+                UserPreferences saved;
+                try {
+                    saved = UserPreferences.load(root);
+                } catch (IOException unreadable) {
+                    throw new IOException("saved settings could not be read securely; not changing them");
+                }
+                String value = set ? BaseUrl.validate(words[2]) : null;
+                saved.withBaseUrl(value).save();
+                result.put("file", saved.file().toString()).put("action", set ? "set" : "unset");
+                if (set) result.put("base_url", value);
+                String override = firstNonBlank(options.baseUrl, environment.get("OPENAI_BASE_URL"),
+                        environment.get("JAVA_AGENT_BASE_URL"));
+                if (override != null) {
+                    result.put("note", "OPENAI_BASE_URL, JAVA_AGENT_BASE_URL, or --base-url still overrides the saved value");
+                }
                 break;
             }
             case "mcp": {
@@ -556,6 +612,31 @@ public final class Main {
                 : Path.of(configured);
     }
 
+    /** CLI, then environment, then saved settings; null means the built-in default. */
+    private static String configuredBaseUrl(Options options, Map<String, String> environment,
+                                            UserPreferences preferences) {
+        return firstNonBlank(options.baseUrl, environment.get("OPENAI_BASE_URL"),
+                environment.get("JAVA_AGENT_BASE_URL"), preferences.baseUrl());
+    }
+
+    private static String baseUrlSource(Options options, Map<String, String> environment,
+                                        UserPreferences preferences) {
+        if (notBlank(options.baseUrl)) return "cli";
+        if (notBlank(environment.get("OPENAI_BASE_URL"))) return "env:OPENAI_BASE_URL";
+        if (notBlank(environment.get("JAVA_AGENT_BASE_URL"))) return "env:JAVA_AGENT_BASE_URL";
+        if (notBlank(preferences.baseUrl())) return "saved";
+        return "default";
+    }
+
+    static String endpointHost(String baseUrl) {
+        try {
+            String host = java.net.URI.create(baseUrl).getHost();
+            return host == null ? baseUrl : host;
+        } catch (IllegalArgumentException invalid) {
+            return baseUrl;
+        }
+    }
+
     private static UserPreferences loadPreferences(Path root, PrintStream error) {
         try {
             return UserPreferences.load(root);
@@ -629,11 +710,12 @@ public final class Main {
                 + "  java -jar target/java-agent.jar [options] acp\n"
                 + "  java -jar target/java-agent.jar [options] skills [list|show|create|remove|install|path] [value]\n"
                 + "  java -jar target/java-agent.jar [options] mcp [list|status]\n"
+                + "  java -jar target/java-agent.jar [options] config [show|set base-url <url>|unset base-url]\n"
                 + "\n"
                 + "Options:\n"
                 + "  --model <id>          OpenAI model (env: OPENAI_MODEL; default: gpt-5.6)\n"
                 + "  --effort <level>      none|minimal|low|medium|high|xhigh|max|default (env: OPENAI_REASONING_EFFORT)\n"
-                + "  --base-url <url>      OpenAI API base URL (env: OPENAI_BASE_URL)\n"
+                + "  --base-url <url>      API base URL (env: OPENAI_BASE_URL; saved: config set base-url)\n"
                 + "  --workspace <path>    Workspace root (default: current directory)\n"
                 + "  --max-steps <count>   Maximum response/tool iterations, 1-100 (default: 20)\n"
                 + "  --resume <id|last>     Resume a saved session for this workspace\n"
@@ -713,6 +795,7 @@ public final class Main {
                     case "sessions":
                     case "skills":
                     case "mcp":
+                    case "config":
                     case "acp": {
                         if (!result.explicitAsk && prompt.isEmpty() && result.command == null) result.command = argument;
                         else prompt.add(argument);
