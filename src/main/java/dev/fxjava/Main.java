@@ -24,6 +24,14 @@ public final class Main {
     private Main() {
     }
 
+    /** {@code JAVA_AGENT_RAW_TERMINAL=0|false|off} keeps the plain line-mode shell. */
+    static boolean rawTerminalEnabled(Map<String, String> environment) {
+        String value = environment.get("JAVA_AGENT_RAW_TERMINAL");
+        if (value == null) return true;
+        String normalized = value.strip().toLowerCase(Locale.ROOT);
+        return !(normalized.equals("0") || normalized.equals("false") || normalized.equals("off"));
+    }
+
     public static void main(String[] args) {
         WindowsNetworkDefaults.apply(System.getenv(), System.getProperties());
         try {
@@ -183,16 +191,17 @@ public final class Main {
         }
 
         TerminalCapabilities capabilities = TerminalCapabilities.detect(environment);
-        if (capabilities.interactive()) {
+        if (capabilities.interactive() && rawTerminalEnabled(environment)) {
             RawTerminal terminal = RawTerminal.open();
             if (terminal != null) {
                 try (RawTerminal owned = terminal) {
                     Ansi ansi = Ansi.fromEnvironment(environment, true);
                     InteractiveShell shell = new InteractiveShell(session, config, systemPrompt, mcp,
-                            sessionRoot, standardInput, out, error, ansi, approval,
+                            sessionRoot, owned.input(standardInput), out, error, ansi, approval,
                             modelSource(options, environment, preferences, options.resume),
                             effortSource(options, environment, preferences), System::nanoTime);
-                    return shell.run(owned, capabilities);
+                    // Size through the raw backend: the Windows console has no stty.
+                    return shell.run(owned, TerminalCapabilities.detect(environment, true, owned::size));
                 }
             }
         }
