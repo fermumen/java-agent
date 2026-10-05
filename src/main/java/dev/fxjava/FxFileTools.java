@@ -381,7 +381,7 @@ final class FxFileTools {
 
     private static String optionalText(JsonNode args, String field, String fallback) {
         JsonNode value = args.get(field);
-        if (value == null || value.isNull() || !value.isTextual()) return fallback;
+        if (value == null || value.isNull() || !value.isTextual() || value.asText().isBlank()) return fallback;
         return value.asText();
     }
 

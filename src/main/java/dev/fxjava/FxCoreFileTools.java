@@ -531,7 +531,8 @@ final class FxCoreFileTools {
 
     private static String optionalText(JsonNode args, String field, String fallback) {
         JsonNode value = args.get(field);
-        return value == null || value.isNull() || !value.isTextual() ? fallback : value.asText();
+        return value == null || value.isNull() || !value.isTextual() || value.asText().isBlank()
+                ? fallback : value.asText();
     }
 
     private static boolean optionalBoolean(JsonNode args, String field, boolean fallback) {

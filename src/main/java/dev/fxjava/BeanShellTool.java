@@ -35,9 +35,9 @@ final class BeanShellTool implements Tool {
         ObjectNode schema = JSON.createObjectNode().put("type", "object");
         ObjectNode properties = schema.putObject("properties");
         properties.putObject("script").put("type", "string")
-                .put("description", "Inline BeanShell source. Provide exactly one of script or path.");
+                .put("description", "Inline BeanShell source. Use script or path, not both; leave the unused one empty.");
         properties.putObject("path").put("type", "string")
-                .put("description", "Workspace-relative .bsh file to run. Provide exactly one of script or path.");
+                .put("description", "Workspace-relative .bsh file to run. Use script or path, not both; leave the unused one empty.");
         ObjectNode args = properties.putObject("args").put("type", "array")
                 .put("description", "Script arguments, available as the String[] bsh.args");
         args.putObject("items").put("type", "string");
@@ -89,15 +89,17 @@ final class BeanShellTool implements Tool {
     }
 
     private static String describe(JsonNode args) {
-        String directory = ToolPreview.safeText(text(args, "working_directory", "."));
+        String workingDirectory = nonBlank(args, "working_directory");
+        String directory = ToolPreview.safeText(workingDirectory == null ? "." : workingDirectory);
         String arguments = scriptArgs(args).isEmpty() ? ""
                 : " with args `" + ToolPreview.safeText(String.join(" ", scriptArgs(args))) + "`";
-        if (args.hasNonNull("path")) {
-            return "run BeanShell script `" + ToolPreview.safeText(text(args, "path", "?")) + "` in `"
+        String path = nonBlank(args, "path");
+        if (path != null && nonBlank(args, "script") == null) {
+            return "run BeanShell script `" + ToolPreview.safeText(path) + "` in `"
                     + directory + "`" + arguments;
         }
         return "run BeanShell in `" + directory + "`" + arguments + ": `"
-                + ToolPreview.safeText(text(args, "script", "")) + "`";
+                + ToolPreview.safeText(String.valueOf(nonBlank(args, "script"))) + "`";
     }
 
     @Override
@@ -107,13 +109,21 @@ final class BeanShellTool implements Tool {
 
     @Override
     public ToolResult executeResult(JsonNode args, String invocationId) throws Exception {
-        boolean inline = args.hasNonNull("script");
-        if (inline == args.hasNonNull("path")) {
-            throw new IllegalArgumentException("Provide exactly one of script or path");
+        String inlineScript = nonBlank(args, "script");
+        String scriptPath = nonBlank(args, "path");
+        if (inlineScript == null && scriptPath == null) {
+            throw new IllegalArgumentException("Both script and path are empty: put BeanShell source in script, "
+                    + "or a workspace-relative .bsh file in path");
         }
+        if (inlineScript != null && scriptPath != null) {
+            throw new IllegalArgumentException("Both script and path were given (path=\"" + scriptPath
+                    + "\"): set path to \"\" to run the inline script, or script to \"\" to run the file");
+        }
+        boolean inline = inlineScript != null;
         int timeout = args.path("timeout_seconds").isMissingNode() ? 120 : args.path("timeout_seconds").asInt();
         if (timeout < 1 || timeout > 600) throw new IllegalArgumentException("timeout_seconds must be from 1 to 600");
-        Path cwd = workspace.resolveExisting(text(args, "working_directory", "."));
+        String directory = nonBlank(args, "working_directory");
+        Path cwd = workspace.resolveExisting(directory == null ? "." : directory);
         if (!Files.isDirectory(cwd)) throw new IOException("Not a directory: " + workspace.display(cwd));
 
         Path jar = productivityJar.get();
@@ -125,14 +135,14 @@ final class BeanShellTool implements Tool {
         byte[] stdin = null;
         String script;
         if (inline) {
-            stdin = args.path("script").asText().getBytes(StandardCharsets.UTF_8);
+            stdin = inlineScript.getBytes(StandardCharsets.UTF_8);
             if (stdin.length > MAX_INLINE_SCRIPT_BYTES) {
                 throw new IllegalArgumentException("Inline script exceeds " + MAX_INLINE_SCRIPT_BYTES
                         + " bytes; write it to a .bsh file and pass path");
             }
             script = "-";
         } else {
-            Path file = workspace.resolveExisting(text(args, "path", ""));
+            Path file = workspace.resolveExisting(scriptPath);
             if (!Files.isRegularFile(file)) throw new IOException("Not a file: " + workspace.display(file));
             script = file.toString();
         }
@@ -155,10 +165,11 @@ final class BeanShellTool implements Tool {
         return result;
     }
 
-    private static String text(JsonNode args, String field, String fallback) {
+    /** Models often send every schema field and fill unused ones with "", so blank means absent. */
+    private static String nonBlank(JsonNode args, String field) {
         JsonNode value = args.path(field);
-        if (value.isMissingNode() || value.isNull()) return fallback;
+        if (value.isMissingNode() || value.isNull()) return null;
         if (!value.isTextual()) throw new IllegalArgumentException(field + " must be a string");
-        return value.asText();
+        return value.asText().isBlank() ? null : value.asText();
     }
 }

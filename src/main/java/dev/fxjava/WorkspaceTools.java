@@ -338,7 +338,8 @@ public final class WorkspaceTools {
 
     private static String optionalText(JsonNode args, String field, String fallback) {
         JsonNode value = args.get(field);
-        return value == null || value.isNull() || !value.isTextual() ? fallback : value.asText();
+        return value == null || value.isNull() || !value.isTextual() || value.asText().isBlank()
+                ? fallback : value.asText();
     }
 
     private static int optionalInt(JsonNode args, String field, int fallback, int minimum, int maximum) {

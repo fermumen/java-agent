@@ -83,6 +83,41 @@ class BeanShellToolTest {
     }
 
     @Test
+    void treatsBlankFieldsAsAbsentLikeModelsThatFillEverySchemaField() throws Exception {
+        Files.writeString(workspace.resolve("create_inventory.bsh"), "print(1);");
+        BeanShellTool tool = tool(fakeRunnerJar());
+
+        ToolResult inline = tool.executeResult(args("{\"script\":\"print(\\\"test\\\");\",\"path\":\"\","
+                + "\"args\":[],\"working_directory\":\"\",\"timeout_seconds\":120}"), null);
+        assertFalse(inline.isError(), inline.output());
+        assertTrue(inline.output().contains("stdin=print(\"test\");"), inline.output());
+
+        ToolResult file = tool.executeResult(args("{\"script\":\"\",\"path\":\"create_inventory.bsh\","
+                + "\"args\":[],\"working_directory\":\".\",\"timeout_seconds\":120}"), null);
+        assertFalse(file.isError(), file.output());
+        assertTrue(file.output().contains("create_inventory.bsh"), file.output());
+        assertEquals("run BeanShell script `create_inventory.bsh` in `.`",
+                tool.preview(args("{\"script\":\" \",\"path\":\"create_inventory.bsh\",\"working_directory\":\"\"}")));
+
+        IllegalArgumentException both = assertThrows(IllegalArgumentException.class, () -> tool.executeResult(
+                args("{\"script\":\"print(1);\",\"path\":\"create_inventory.bsh\"}"), null));
+        assertTrue(both.getMessage().contains("path=\"create_inventory.bsh\""), both.getMessage());
+        assertTrue(both.getMessage().contains("set path to \"\" to run the inline script"), both.getMessage());
+        IllegalArgumentException neither = assertThrows(IllegalArgumentException.class,
+                () -> tool.executeResult(args("{\"script\":\"\",\"path\":\"  \"}"), null));
+        assertTrue(neither.getMessage().contains("Both script and path are empty"), neither.getMessage());
+    }
+
+    @Test
+    void fileToolsTreatBlankOptionalPathsAsTheWorkspaceRoot() throws Exception {
+        Files.writeString(workspace.resolve("visible.txt"), "x");
+        Tool list = named(WorkspaceTools.create(workspace, workspace.resolve(".state")), "list_files");
+
+        String listing = list.execute(args("{\"path\":\"\"}"));
+        assertTrue(listing.contains("visible.txt"), listing);
+    }
+
+    @Test
     void rejectsAmbiguousOrInvalidRequests() throws Exception {
         BeanShellTool tool = tool(fakeRunnerJar());
 
