@@ -83,7 +83,7 @@ class StatsCommandsTest {
 
     private int occurrencesMatchingRow(String output) {
         int rows = 0;
-        for (String line : output.split("\n")) {
+        for (String line : output.split("\\R")) {
             if ((line.startsWith("   ") || line.startsWith("  *")) && line.contains("total")) rows++;
         }
         return rows;
@@ -155,7 +155,7 @@ class StatsCommandsTest {
     }
 
     private java.util.List<String> lines(ByteArrayOutputStream bytes) {
-        return java.util.List.of(bytes.toString(StandardCharsets.UTF_8).split("\n"));
+        return java.util.List.of(bytes.toString(StandardCharsets.UTF_8).split("\\R"));
     }
 
     private Agent agent() {

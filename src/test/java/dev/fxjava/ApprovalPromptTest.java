@@ -79,7 +79,7 @@ class ApprovalPromptTest {
     @Test
     void previewWrapsInsideTheBorder() {
         ApprovalPrompt.render(out, Ansi.of(false), 30, "run", "alpha beta gamma delta epsilon");
-        String[] lines = output().split("\n");
+        String[] lines = output().split("\\R");
         assertTrue(lines.length >= 5, "wrapped body rows expected: " + output());
         assertTrue(lines[2].startsWith("│ alpha beta "));
         assertTrue(lines[3].startsWith("│ "));

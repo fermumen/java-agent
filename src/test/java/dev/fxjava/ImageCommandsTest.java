@@ -48,7 +48,7 @@ class ImageCommandsTest {
         ImageCommands.handle(session, "oversized.png", workspace, Ansi.of(false), out);
         ImageCommands.handle(session, "", workspace, Ansi.of(false), out);
 
-        String[] lines = output.toString(StandardCharsets.UTF_8).split("\n");
+        String[] lines = output.toString(StandardCharsets.UTF_8).split("\\R");
         assertTrue(lines[0].startsWith("image file not found"), lines[0]);
         assertEquals("unsupported image type: notes.png", lines[1]);
         assertTrue(lines[2].startsWith("image file not found"), lines[2]);
