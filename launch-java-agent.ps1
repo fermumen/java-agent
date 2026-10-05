@@ -28,12 +28,41 @@ if (-not $javaPath) {
     exit 9009
 }
 
+# Some Windows JREs (IBM Semeru/OpenJ9) write the console with the ANSI code
+# page while the console decodes its OEM code page, which garbles non-ASCII
+# output. Switch this console to UTF-8 for the run and restore it afterwards.
+# Set JAVA_AGENT_CONSOLE_UTF8=0 to keep the current code page.
+$savedOutputEncoding = $null
+$savedInputEncoding = $null
+$javaOptions = @()
+if ($env:JAVA_AGENT_CONSOLE_UTF8 -notin @('0', 'false', 'off')) {
+    try {
+        $utf8 = New-Object System.Text.UTF8Encoding $false
+        $savedOutputEncoding = [Console]::OutputEncoding
+        $savedInputEncoding = [Console]::InputEncoding
+        [Console]::OutputEncoding = $utf8
+        [Console]::InputEncoding = $utf8
+        $javaOptions = @('-Dfile.encoding=UTF-8')
+    } catch {
+        # No attached console (redirected or headless): leave encodings alone.
+        $savedOutputEncoding = $null
+        $savedInputEncoding = $null
+    }
+}
+
 try {
-    & $javaPath -jar $jarPath @args
+    & $javaPath @javaOptions -jar $jarPath @args
     $javaExitCode = $LASTEXITCODE
 } catch {
     [Console]::Error.WriteLine('java-agent: could not start Java: ' + $_.Exception.Message)
     exit 1
+} finally {
+    try {
+        if ($null -ne $savedOutputEncoding) { [Console]::OutputEncoding = $savedOutputEncoding }
+        if ($null -ne $savedInputEncoding) { [Console]::InputEncoding = $savedInputEncoding }
+    } catch {
+        # Best effort: the console may already be gone.
+    }
 }
 
 if ($null -eq $javaExitCode) {

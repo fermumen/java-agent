@@ -111,10 +111,16 @@ mvn package
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-user-path.ps1
 ```
 
-The installer copies the launcher and jar to `%LOCALAPPDATA%\java-agent\bin`
-and adds that directory to your user PATH. Open a new terminal afterward.
+The installer copies the launcher and jars to `%LOCALAPPDATA%\java-agent\bin`
+and adds that directory to your user PATH. It also works from an unzipped CI
+artifact, which ships the jars beside `install-user-path.ps1`. Open a new terminal afterward.
 The `.cmd` launcher uses PowerShell's process-only execution-policy bypass; it
-does not change a saved policy. Enforced Group Policy or AppLocker rules can
+does not change a saved policy. It also switches the console to UTF-8 for the
+run and restores the previous code page on exit, because some JREs (for
+example IBM Semeru) otherwise write the ANSI code page to an OEM-code-page
+console and garble non-ASCII output. Set `JAVA_AGENT_CONSOLE_UTF8=0` to skip
+this. When running `java -jar` directly on such a JRE, run `chcp 65001` first
+and pass `-Dfile.encoding=UTF-8`. Enforced Group Policy or AppLocker rules can
 still block execution. The command keeps the calling directory as the
 workspace, so `java-agent ask "Inspect this folder"` works from any directory;
 use `--workspace` to select another one.
