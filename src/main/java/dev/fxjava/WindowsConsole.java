@@ -7,6 +7,7 @@ import com.sun.jna.ptr.IntByReference;
 import com.sun.jna.win32.StdCallLibrary;
 
 import java.nio.charset.StandardCharsets;
+import java.util.function.Consumer;
 
 /**
  * Raw mode for the Windows console (Windows Terminal, conhost) through the
@@ -41,6 +42,9 @@ final class WindowsConsole {
 
         /** Blocks for the next typed UTF-16 text; null when the read fails. */
         String read();
+
+        /** The Win32 error code of the last failed call, for fallback diagnostics. */
+        int lastError();
     }
 
     private WindowsConsole() {
@@ -50,23 +54,40 @@ final class WindowsConsole {
         return System.getProperty("os.name", "").startsWith("Windows");
     }
 
-    /** Enters raw mode on the attached console, or null when unsupported or JNA cannot load. */
-    static RawTerminal open() {
+    /**
+     * Enters raw mode on the attached console, or returns null after telling
+     * {@code declined} why: not a console, a refused mode, or JNA unable to load.
+     */
+    static RawTerminal open(Consumer<String> declined) {
+        Api api;
         try {
-            return open(new Kernel32Api());
+            api = new Kernel32Api();
         } catch (LinkageError | RuntimeException unavailable) {
-            // Missing native support (or a locked-down temp directory JNA
-            // cannot unpack into) falls back to the line-mode shell.
+            // Missing native support, or a locked-down temp directory JNA
+            // cannot unpack its DLL into (see -Djna.tmpdir).
+            declined.accept("JNA could not load the Windows console API: " + unavailable);
             return null;
         }
+        return open(api, declined);
     }
 
-    static RawTerminal open(Api api) {
+    static RawTerminal open(Api api, Consumer<String> declined) {
         Integer savedInput = api.inputMode();
+        if (savedInput == null) {
+            declined.accept("standard input is not a console (GetConsoleMode error " + api.lastError() + ")");
+            return null;
+        }
         Integer savedOutput = api.outputMode();
-        if (savedInput == null || savedOutput == null) return null;
-        if (!api.setOutputMode(vtOutputMode(savedOutput))) return null;
+        if (savedOutput == null) {
+            declined.accept("standard output is not a console (GetConsoleMode error " + api.lastError() + ")");
+            return null;
+        }
+        if (!api.setOutputMode(vtOutputMode(savedOutput))) {
+            declined.accept("the console refused VT output (SetConsoleMode error " + api.lastError() + ")");
+            return null;
+        }
         if (!api.setInputMode(rawInputMode(savedInput))) {
+            declined.accept("the console refused raw VT input (SetConsoleMode error " + api.lastError() + ")");
             api.setOutputMode(savedOutput);
             return null;
         }
@@ -169,6 +190,11 @@ final class WindowsConsole {
             int rows = info.getShort(16) - info.getShort(12) + 1;
             return rows > 0 && columns > 0
                     ? new TerminalCapabilities.Size(rows, columns) : TerminalCapabilities.Size.UNKNOWN;
+        }
+
+        @Override
+        public int lastError() {
+            return Native.getLastError();
         }
 
         @Override

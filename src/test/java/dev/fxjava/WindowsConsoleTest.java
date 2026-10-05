@@ -43,6 +43,8 @@ class WindowsConsoleTest {
             return true;
         }
 
+        @Override public int lastError() { return 6; }
+
         @Override public TerminalCapabilities.Size size() { return new TerminalCapabilities.Size(30, 120); }
 
         @Override public String read() {
@@ -54,6 +56,8 @@ class WindowsConsoleTest {
             }
         }
     }
+
+    private final List<String> declined = new ArrayList<>();
 
     @Test
     void rawInputDropsLineEchoAndSignalsAndAddsVtInput() {
@@ -68,7 +72,7 @@ class WindowsConsoleTest {
     @Test
     void openSwitchesOutputThenInputAndCloseRestoresBothExactly() throws Exception {
         FakeConsole console = new FakeConsole();
-        RawTerminal terminal = WindowsConsole.open(console);
+        RawTerminal terminal = WindowsConsole.open(console, declined::add);
         assertNotNull(terminal);
         assertEquals(List.of("out 7", "in " + Integer.toHexString(WindowsConsole.rawInputMode(0x01f7))),
                 console.calls);
@@ -82,22 +86,24 @@ class WindowsConsoleTest {
     void redirectedHandlesFallBackWithoutTouchingModes() {
         FakeConsole console = new FakeConsole();
         console.input = null;
-        assertNull(WindowsConsole.open(console));
+        assertNull(WindowsConsole.open(console, declined::add));
         assertTrue(console.calls.isEmpty());
+        assertEquals(List.of("standard input is not a console (GetConsoleMode error 6)"), declined);
     }
 
     @Test
     void inputModeFailureRestoresTheOutputMode() {
         FakeConsole console = new FakeConsole();
         console.inputSettable = false;
-        assertNull(WindowsConsole.open(console));
+        assertNull(WindowsConsole.open(console, declined::add));
         assertEquals("out 3", console.calls.get(console.calls.size() - 1));
+        assertEquals(List.of("the console refused raw VT input (SetConsoleMode error 6)"), declined);
     }
 
     @Test
     void typedTextArrivesAsUtf8WithSplitSurrogatesJoined() throws Exception {
         FakeConsole console = new FakeConsole();
-        RawTerminal terminal = WindowsConsole.open(console);
+        RawTerminal terminal = WindowsConsole.open(console, declined::add);
         InputStream keys = terminal.input(InputStream.nullInputStream());
         String emoji = "😀";
         console.reads.add("é\u001b[A" + emoji.charAt(0));
@@ -132,8 +138,9 @@ class WindowsConsoleTest {
         WindowsConsole.Kernel32 kernel = Native.load("kernel32", WindowsConsole.Kernel32.class);
         assertNotNull(kernel.GetStdHandle(-11));
         // CI has no interactive console: open() must decline cleanly, never throw.
-        RawTerminal terminal = WindowsConsole.open();
+        RawTerminal terminal = WindowsConsole.open(declined::add);
         if (terminal != null) terminal.close();
+        else assertEquals(1, declined.size(), "a declined open always says why");
     }
 
     private static byte[] readExactly(InputStream in, int count) throws Exception {

@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 /**
  * Raw-mode terminal control: {@code stty} on Unix-like systems, the console
@@ -37,17 +38,34 @@ final class RawTerminal implements AutoCloseable {
         return new RawTerminal(restore, sizeSource, input);
     }
 
-    /** Enters raw mode on the controlling terminal, or returns null when unsupported. */
-    static RawTerminal open() throws InterruptedException {
-        if (System.console() == null) return null;
-        if (WindowsConsole.isWindows()) return WindowsConsole.open();
-        return open(new SttyRunner(), new TerminalCapabilities.SttySizeSource());
+    /**
+     * Enters raw mode on the controlling terminal, or returns null after
+     * telling {@code declined} why, so a fallback is never silent.
+     */
+    static RawTerminal open(Consumer<String> declined) throws InterruptedException {
+        if (System.console() == null) {
+            declined.accept("Java sees no console (input or output is redirected)");
+            return null;
+        }
+        if (WindowsConsole.isWindows()) return WindowsConsole.open(declined);
+        return open(new SttyRunner(), new TerminalCapabilities.SttySizeSource(), declined);
     }
 
     static RawTerminal open(Stty stty, TerminalCapabilities.SizeSource sizeSource) throws InterruptedException {
+        return open(stty, sizeSource, reason -> { });
+    }
+
+    static RawTerminal open(Stty stty, TerminalCapabilities.SizeSource sizeSource, Consumer<String> declined)
+            throws InterruptedException {
         String saved = stty.runCapture("stty", "-g");
-        if (saved == null || saved.isBlank()) return null;
-        if (!stty.runInherit("stty", "raw", "-echo")) return null;
+        if (saved == null || saved.isBlank()) {
+            declined.accept("stty -g could not read the terminal state");
+            return null;
+        }
+        if (!stty.runInherit("stty", "raw", "-echo")) {
+            declined.accept("stty raw -echo failed");
+            return null;
+        }
         String state = saved.trim();
         return new RawTerminal(() -> stty.runInherit("stty", state), sizeSource, null);
     }

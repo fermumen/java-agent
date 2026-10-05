@@ -24,6 +24,20 @@ public final class Main {
     private Main() {
     }
 
+    /** Probes raw mode by entering and immediately restoring it; the detail names the backend or the reason. */
+    private static String terminalCheck(Map<String, String> environment) throws InterruptedException {
+        if (!rawTerminalEnabled(environment)) return "plain prompt: disabled by JAVA_AGENT_RAW_TERMINAL";
+        String term = environment.get("TERM");
+        if ("dumb".equals(term)) return "plain prompt: TERM=dumb";
+        List<String> declined = new ArrayList<>();
+        RawTerminal probe = RawTerminal.open(declined::add);
+        if (probe == null) return "plain prompt: " + (declined.isEmpty() ? "raw mode unavailable" : declined.get(0));
+        TerminalCapabilities.Size size = probe.size();
+        probe.close();
+        return "raw mode available (" + (WindowsConsole.isWindows() ? "Windows console" : "stty")
+                + ", " + size + ", java " + System.getProperty("java.version") + ")";
+    }
+
     /** {@code JAVA_AGENT_RAW_TERMINAL=0|false|off} keeps the plain line-mode shell. */
     static boolean rawTerminalEnabled(Map<String, String> environment) {
         String value = environment.get("JAVA_AGENT_RAW_TERMINAL");
@@ -192,7 +206,13 @@ public final class Main {
 
         TerminalCapabilities capabilities = TerminalCapabilities.detect(environment);
         if (capabilities.interactive() && rawTerminalEnabled(environment)) {
-            RawTerminal terminal = RawTerminal.open();
+            List<String> declined = new ArrayList<>();
+            RawTerminal terminal = RawTerminal.open(declined::add);
+            if (terminal == null && !declined.isEmpty()) {
+                error.println("java-agent: interactive UI unavailable: " + declined.get(0)
+                        + ". Using the plain prompt; run `java-agent doctor` for details,"
+                        + " or set JAVA_AGENT_RAW_TERMINAL=0 to hide this.");
+            }
             if (terminal != null) {
                 try (RawTerminal owned = terminal) {
                     Ansi ansi = Ansi.fromEnvironment(environment, true);
@@ -410,8 +430,14 @@ public final class Main {
                         environment.get("JAVA_AGENT_API_KEY"), preferences.apiKey()) != null;
                 checks.addObject().put("name", "auth").put("status", authenticated ? "ok" : "fail")
                         .put("detail", authenticated ? "OpenAI API key available" : "OpenAI API key is not configured");
+                String terminal = terminalCheck(environment);
+                boolean terminalOk = terminal.startsWith("raw mode available");
+                checks.addObject().put("name", "terminal").put("status", terminalOk ? "ok" : "warn")
+                        .put("detail", terminal);
                 int failures = (workspaceOk ? 0 : 1) + (authenticated ? 0 : 1);
-                result.put("ok_count", 3 - failures).put("warn_count", 0).put("fail_count", failures);
+                int warnings = terminalOk ? 0 : 1;
+                result.put("ok_count", 4 - failures - warnings).put("warn_count", warnings)
+                        .put("fail_count", failures);
                 break;
             }
             case "skills": {
@@ -480,7 +506,8 @@ public final class Main {
                 throw new IllegalArgumentException("Unknown command: " + options.command);
         }
         if (options.json) out.println(json.writeValueAsString(result));
-        else result.properties().forEach(entry -> out.println(entry.getKey() + "=" + entry.getValue().asText()));
+        else result.properties().forEach(entry -> out.println(entry.getKey() + "="
+                + (entry.getValue().isContainerNode() ? entry.getValue().toString() : entry.getValue().asText())));
         return 0;
     }
 
