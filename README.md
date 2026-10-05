@@ -8,7 +8,9 @@ Completions transport.
 The executable agent's only runtime dependency is Jackson for JSON. HTTP uses
 the JDK client, so standard corporate JVM proxy and trust-store settings
 continue to apply. A separately built productivity JAR provides document and
-data-processing libraries to JShell without coupling them to the agent runtime.
+data-processing libraries and a BeanShell script runner without coupling them
+to the agent runtime, so scripted work runs on a plain JRE without `jshell` or
+`javac`.
 
 ## Features
 
@@ -40,6 +42,11 @@ data-processing libraries to JShell without coupling them to the agent runtime.
   filtered updates, prompts, completion, strict validation, health policy,
   atomic local config reload, and no-auth status reporting
 - Captured `run_command` execution with a timeout and bounded output
+- `beanshell` tool that runs inline or `.bsh` scripts against the productivity
+  bundle on a plain JRE, with BeanShell syntax limits in its description
+- `run_command` and `terminal` descriptions warn that the production Windows
+  host has no developer tools (git, rg, curl, Python) and possibly restricted
+  PowerShell, and point to the file tools and `beanshell`
 - FX-shaped `terminal` actions for captured exec, bounded background-process
   lifecycles, plain-output screen snapshots, and process-lifetime monitors
 - Optional OpenAI-hosted Responses web search (`--web-search`)
@@ -79,17 +86,17 @@ java-agent.jar
 productivity.jar
 ```
 
-The agent's system prompt supplies that absolute path and directs artifact
-creation through reusable Java source-file programs, with JShell available for
-exploration. Override the location with
-`JAVA_AGENT_PRODUCTIVITY_JAR` when the files cannot be colocated. For example:
+The agent's `beanshell` tool runs scripts through the bundle's fail-closed
+runner in a child JVM that uses the agent's own Java runtime; it needs
+approval like `run_command`. Override the bundle location with
+`JAVA_AGENT_PRODUCTIVITY_JAR` when the files cannot be colocated. The runner can
+also be used directly:
 
 ```sh
-jshell --class-path "target/productivity.jar" script.jsh
-java --class-path "target/productivity.jar" Script.java
+java -jar "target/productivity.jar" report.bsh input.xlsx
 ```
 
-The bundle contains Apache POI, PDFBox, Tika Core, Commons CSV/IO/Compress/Lang/
+The bundle contains BeanShell 2.0b6, Apache POI, PDFBox, Tika Core, Commons CSV/IO/Compress/Lang/
 Text/Codec/Math, Jackson JSON and YAML, jsoup, commonmark with GFM tables,
 selected TwelveMonkeys ImageIO plugins, XZ, and XChart. It intentionally omits
 native/JNI dependencies and Tika's full parser package.

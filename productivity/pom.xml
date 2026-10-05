@@ -152,6 +152,13 @@
       <version>4.0.4</version>
     </dependency>
 
+    <!-- Script interpreter for JRE-only targets that have neither jshell nor javac. -->
+    <dependency>
+      <groupId>org.apache-extras.beanshell</groupId>
+      <artifactId>bsh</artifactId>
+      <version>2.0b6</version>
+    </dependency>
+
     <!-- Keep library-driven diagnostics quiet in short-lived agent scripts. -->
     <dependency>
       <groupId>org.apache.logging.log4j</groupId>
@@ -228,6 +235,9 @@
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheLicenseResourceTransformer"/>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheNoticeResourceTransformer"/>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                  <mainClass>dev.fxjava.productivity.BshRun</mainClass>
+                </transformer>
               </transformers>
             </configuration>
           </execution>
@@ -264,7 +274,6 @@
               <arguments>
                 <argument>--class-path</argument>
                 <argument>${project.build.directory}/productivity.jar</argument>
-                <argument>${project.basedir}/ProductivitySmoke.java</argument>
                 <argument>${project.basedir}/ProductivitySmoke.java</argument>
               </arguments>
             </configuration>

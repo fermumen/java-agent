@@ -9,20 +9,22 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AgentSystemPromptTest {
     @Test
-    void advertisesPortableProductivityScriptWorkflow() {
+    void pointsProductivityWorkToTheBeanShellToolOnAMinimalHost() {
         AgentConfig config = new AgentConfig("key", "https://example.test/v1", "model",
                 Path.of("workspace").toAbsolutePath(), 10, PermissionMode.ASK);
 
         String prompt = Agent.defaultSystemPrompt(config);
 
         assertTrue(prompt.contains("productivity.jar"));
-        assertTrue(prompt.contains("java --class-path \""));
-        assertTrue(prompt.contains(" Script.java"));
-        assertTrue(prompt.contains("Uncaught\nexceptions produce a failing process status"));
-        assertTrue(prompt.contains("after writing an artifact, reopen it and assert its"));
-        assertTrue(prompt.contains("only when the snippet explicitly reports failures"));
-        assertFalse(prompt.contains("jshell --class-path"),
-                "JShell is an optional exploration path, not the artifact validation workflow");
+        assertTrue(prompt.contains("use the beanshell tool; its description lists the\nBeanShell syntax limits"));
+        assertTrue(prompt.contains("jshell, javac, and `java Script.java` are unavailable"));
+        assertTrue(prompt.contains("no git, rg, grep, curl, or Python"));
+        assertTrue(prompt.contains("restricted PowerShell"));
+        assertTrue(prompt.contains("Prefer the file tools over shell commands"));
+        assertFalse(prompt.contains("No generics"), "syntax limits live in the beanshell tool description");
+        assertFalse(prompt.contains("jshell --class-path"));
+        assertFalse(prompt.contains("java --class-path"),
+                "the target is a plain JRE, so source-file launch must not be advertised");
         assertTrue(prompt.contains("Windows"));
         assertTrue(prompt.contains("Linux"));
         assertTrue(prompt.contains("Verify that file exists"));

@@ -23,6 +23,12 @@ import java.util.stream.Collectors;
 public final class WorkspaceTools {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final int MAX_OUTPUT_BYTES = 200_000;
+    /** The production host is a locked-down Windows machine with a plain JRE and no developer tools. */
+    static final String MINIMAL_HOST = "The production host is a minimal Windows machine: expect only cmd.exe "
+            + "built-ins and the JRE. git, rg, grep, find/xargs, curl, Python, Node, jshell, and javac are not "
+            + "installed, and PowerShell may be missing or restricted, so do not rely on it. Use the file tools "
+            + "to list, search, read, and edit files, and the beanshell tool for scripting and data processing; "
+            + "use this tool only for simple commands that need nothing else.";
 
     private WorkspaceTools() {
     }
@@ -40,6 +46,7 @@ public final class WorkspaceTools {
         RunCommand commands = new RunCommand(paths);
         tools.add(commands);
         tools.add(new TerminalTool(paths, commands));
+        tools.add(new BeanShellTool(paths, BeanShellTool.defaultJava(), Agent::productivityJar));
         return List.copyOf(tools.stream().map(tool -> (Tool) new ExternalApprovalTool(tool, paths))
                 .collect(Collectors.toList()));
     }
@@ -109,7 +116,7 @@ public final class WorkspaceTools {
 
         @Override public String name() { return "run_command"; }
         @Override public String description() {
-            return "Run one captured command in the workspace, using cmd.exe on Windows.";
+            return "Run one captured command in the workspace, using cmd.exe on Windows. " + MINIMAL_HOST;
         }
         @Override public ObjectNode parameters() { return parameters; }
         @Override public boolean requiresApproval() { return true; }
@@ -131,83 +138,97 @@ public final class WorkspaceTools {
             if (!Files.isDirectory(cwd)) throw new IOException("Not a directory: " + workspace.display(cwd));
 
             boolean windows = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("windows");
-            ProcessBuilder builder = windows
-                    ? new ProcessBuilder("cmd.exe", "/d", "/s", "/c", command)
-                    : new ProcessBuilder("/bin/sh", "-lc", command);
-            builder.environment().remove("JAVA_AGENT_API_KEY");
-            builder.environment().remove("OPENAI_API_KEY");
-            Process process = builder.directory(cwd.toFile()).redirectErrorStream(true).start();
-            ProcessTreeCleanup tree = new ProcessTreeCleanup(process, "java-agent-command-tree");
-            OutputCollector output = new OutputCollector(process.getInputStream());
-            output.start();
-            try {
-                try (OutputStream stdin = process.getOutputStream()) {
-                    // Captured commands have no interactive stdin contract.
-                }
-                boolean exited = waitFor(process, timeout, tree);
-                if (!exited) {
-                    tree.terminate(false, 250, 1_000);
-                } else {
-                    tree.capture();
-                    if (tree.hasLiveDescendants()) tree.terminate(false, 100, 500);
-                }
-                boolean collected = output.await(1_500);
-                boolean collectionTimedOut = !collected;
-                if (!collected) {
-                    // An exited shell can leave a child holding its inherited pipe.
-                    tree.terminate(false, 100, 500);
-                    output.closePipe();
-                    collected = output.await(500);
-                }
-                String captured = output.text();
-                if (!collected || collectionTimedOut) {
-                    return ToolResult.error(appendLine(captured,
-                            "Error: command output collection did not finish after process cleanup"));
-                }
-                if (output.failure() != null) {
-                    return ToolResult.error(appendLine(captured,
-                            "Error: could not read command output: " + output.failure().getMessage()));
-                }
-                if (!exited) {
-                    return ToolResult.timeout(appendLine(captured,
-                            "Command timed out after " + timeout + " seconds"));
-                }
-                int exitCode = process.exitValue();
-                String result = appendLine(captured, "Exit code: " + exitCode);
-                return exitCode == 0 ? ToolResult.success(result) : ToolResult.error(result);
-            } catch (InterruptedException interrupted) {
+            List<String> argv = windows
+                    ? List.of("cmd.exe", "/d", "/s", "/c", command)
+                    : List.of("/bin/sh", "-lc", command);
+            return runCaptured(argv, cwd, timeout, null);
+        }
+    }
+
+    /**
+     * Runs one captured process with merged, bounded output, a timeout, and
+     * process-tree cleanup. {@code stdin} is written and closed before waiting;
+     * null closes stdin immediately.
+     */
+    static ToolResult runCaptured(List<String> argv, Path cwd, int timeout, byte[] stdin)
+            throws IOException, InterruptedException {
+        ProcessBuilder builder = new ProcessBuilder(argv);
+        builder.environment().remove("JAVA_AGENT_API_KEY");
+        builder.environment().remove("OPENAI_API_KEY");
+        Process process = builder.directory(cwd.toFile()).redirectErrorStream(true).start();
+        ProcessTreeCleanup tree = new ProcessTreeCleanup(process, "java-agent-command-tree");
+        OutputCollector output = new OutputCollector(process.getInputStream());
+        output.start();
+        try {
+            try (OutputStream input = process.getOutputStream()) {
+                // Captured commands have no interactive stdin contract beyond this payload.
+                if (stdin != null) input.write(stdin);
+            } catch (IOException ignored) {
+                // A child that exits before reading its input reports through its status.
+            }
+            boolean exited = waitFor(process, timeout, tree);
+            if (!exited) {
                 tree.terminate(false, 250, 1_000);
-                output.closePipe();
-                output.stop();
-                throw interrupted;
-            } finally {
-                if (process.isAlive()) tree.terminate(false, 100, 500);
-                tree.close();
-                output.closePipe();
-                output.stop();
-            }
-        }
-
-        private static boolean waitFor(Process process, int timeoutSeconds, ProcessTreeCleanup tree)
-                throws InterruptedException {
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
-            while (process.isAlive()) {
+            } else {
                 tree.capture();
-                long remaining = deadline - System.nanoTime();
-                if (remaining <= 0) return false;
-                long slice = Math.min(TimeUnit.MILLISECONDS.toNanos(50), remaining);
-                if (process.waitFor(slice, TimeUnit.NANOSECONDS)) {
-                    tree.capture();
-                    return true;
-                }
+                if (tree.hasLiveDescendants()) tree.terminate(false, 100, 500);
             }
-            tree.capture();
-            return true;
+            boolean collected = output.await(1_500);
+            boolean collectionTimedOut = !collected;
+            if (!collected) {
+                // An exited shell can leave a child holding its inherited pipe.
+                tree.terminate(false, 100, 500);
+                output.closePipe();
+                collected = output.await(500);
+            }
+            String captured = output.text();
+            if (!collected || collectionTimedOut) {
+                return ToolResult.error(appendLine(captured,
+                        "Error: command output collection did not finish after process cleanup"));
+            }
+            if (output.failure() != null) {
+                return ToolResult.error(appendLine(captured,
+                        "Error: could not read command output: " + output.failure().getMessage()));
+            }
+            if (!exited) {
+                return ToolResult.timeout(appendLine(captured,
+                        "Command timed out after " + timeout + " seconds"));
+            }
+            int exitCode = process.exitValue();
+            String result = appendLine(captured, "Exit code: " + exitCode);
+            return exitCode == 0 ? ToolResult.success(result) : ToolResult.error(result);
+        } catch (InterruptedException interrupted) {
+            tree.terminate(false, 250, 1_000);
+            output.closePipe();
+            output.stop();
+            throw interrupted;
+        } finally {
+            if (process.isAlive()) tree.terminate(false, 100, 500);
+            tree.close();
+            output.closePipe();
+            output.stop();
         }
+    }
 
-        private static String appendLine(String value, String line) {
-            return value + (value.endsWith("\n") || value.isEmpty() ? "" : "\n") + line;
+    private static boolean waitFor(Process process, int timeoutSeconds, ProcessTreeCleanup tree)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
+        while (process.isAlive()) {
+            tree.capture();
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0) return false;
+            long slice = Math.min(TimeUnit.MILLISECONDS.toNanos(50), remaining);
+            if (process.waitFor(slice, TimeUnit.NANOSECONDS)) {
+                tree.capture();
+                return true;
+            }
         }
+        tree.capture();
+        return true;
+    }
+
+    private static String appendLine(String value, String line) {
+        return value + (value.endsWith("\n") || value.isEmpty() ? "" : "\n") + line;
     }
 
     static final class Workspace {
