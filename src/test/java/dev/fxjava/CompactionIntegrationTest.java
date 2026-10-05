@@ -645,7 +645,7 @@ class CompactionIntegrationTest {
             shell.dispatch("/stats");
         }
         String output = bytes.toString(StandardCharsets.UTF_8);
-        assertFalse(output.contains("tokens:"), "failed turns print no UI tokens line");
+        assertFalse(output.contains("↑ "), "failed turns print no UI tokens line");
         assertTrue(errorBytes.toString(StandardCharsets.UTF_8).contains("provider exploded"));
         assertTrue(output.contains(": 100 in · 10 out · 110 total"),
                 "already-consumed step tokens reach /stats after the failure: " + output);

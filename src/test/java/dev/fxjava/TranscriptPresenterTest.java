@@ -62,10 +62,10 @@ class TranscriptPresenterTest {
         presenter.onToolEnd("write_file", false);
         presenter.onDelta("# Done\n");
         presenter.finish();
-        assertEquals("\r\u001b[2K⠋ 0s"
+        assertEquals("\r\u001b[2K⠋ Thinking… 0s"
                 + "\r\u001b[2K● write_file write smoke.txt"
-                + "\r\u001b[2K✓ write_file\n"
-                + "\r\u001b[2K⠋ 0s"
+                + "\r\u001b[2K✓ write_file write smoke.txt · 0.0s\n"
+                + "\r\u001b[2K⠋ Thinking… 0s"
                 + "\r\u001b[2K\nDone\n", output());
     }
 
@@ -74,11 +74,11 @@ class TranscriptPresenterTest {
         TranscriptPresenter presenter = newPresenter(80);
         presenter.begin();
         presenter.cancel();
-        assertEquals("\r\u001b[2K⠋ 0s\r\u001b[2K", output());
+        assertEquals("\r\u001b[2K⠋ Thinking… 0s\r\u001b[2K", output());
         presenter.onDelta("late partial ");
         presenter.onToolStart("echo", "hi");
         presenter.finish();
-        assertEquals("\r\u001b[2K⠋ 0s\r\u001b[2K", output());
+        assertEquals("\r\u001b[2K⠋ Thinking… 0s\r\u001b[2K", output());
     }
 
     @Test

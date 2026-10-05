@@ -26,6 +26,26 @@ final class StatsCommands {
                 + (inputTokens + outputTokens) + " total";
     }
 
+    /** Compact per-turn form for the interactive shell: {@code ↑ 1.2k ↓ 340}. */
+    static String compact(long inputTokens, long outputTokens) {
+        return "↑ " + abbreviate(inputTokens) + " ↓ " + abbreviate(outputTokens);
+    }
+
+    static String abbreviate(long tokens) {
+        if (tokens < 1_000) return Long.toString(tokens);
+        if (tokens < 1_000_000) return scaled(tokens, 1_000) + "k";
+        return scaled(tokens, 1_000_000) + "M";
+    }
+
+    /** One decimal below ten units ({@code 1.2k}), whole units above ({@code 48k}). */
+    private static String scaled(long tokens, long unit) {
+        if (tokens < 10 * unit) {
+            long tenths = tokens * 10 / unit;
+            return tenths % 10 == 0 ? Long.toString(tenths / 10) : tenths / 10 + "." + tenths % 10;
+        }
+        return Long.toString(tokens / unit);
+    }
+
     /** Handles one /stats invocation; {@code argument} is the trimmed remainder. */
     static void handle(SessionRuntime session, String argument, java.nio.file.Path workspace,
                        Ansi ansi, PrintStream out) {

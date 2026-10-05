@@ -23,7 +23,7 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 final class InteractiveShell implements QuestionFlow {
     private static final long CTRL_C_EXIT_WINDOW_NANOS = 1_500_000_000L;
-    private static final long SPINNER_INTERVAL_NANOS = 100_000_000L;
+    private static final long SPINNER_INTERVAL_NANOS = 80_000_000L;
     private static final long SIZE_REFRESH_INTERVAL_NANOS = 250_000_000L;
     private static final int TYPE_AHEAD_CAPACITY_CHARS = 4096;
     private static final int LINE_INPUT_LIMIT_CHARS = 256;
@@ -316,8 +316,7 @@ final class InteractiveShell implements QuestionFlow {
 
     private void submit(String line) throws IOException, InterruptedException {
         eraseRendered();
-        out.print(promptStyled());
-        out.println(line.replace("\n", " ⏎ "));
+        out.println(InputBox.echo(line.replace("\n", " ⏎ "), ansi));
         out.flush();
         composer.clear();
         renderedRows = 0;
@@ -491,6 +490,7 @@ final class InteractiveShell implements QuestionFlow {
         AtomicReference<String> answer = new AtomicReference<>("");
         AtomicReference<IOException> failure = new AtomicReference<>();
         long[] turnUsage = new long[2];
+        long turnStartedAt = clock.nanoTime();
         Thread generator = new Thread(() -> {
             try {
                 String result = session.prompt(prompt, delta -> {
@@ -539,15 +539,15 @@ final class InteractiveShell implements QuestionFlow {
             return;
         }
         if (cancelled.get()) return;
-        printTurnUsage(turnUsage[0], turnUsage[1]);
+        printTurnUsage(turnUsage[0], turnUsage[1], clock.nanoTime() - turnStartedAt);
         if (streamed.get()) return;
         if (!answer.get().isBlank()) out.println(new MarkdownConsole(ansi).render(answer.get(), columns));
     }
 
-    /** Dim per-turn totals line; printed only after the spinner is fully erased. */
-    private void printTurnUsage(long inputTokens, long outputTokens) {
-        out.println(ansi.dim() + "tokens: " + StatsCommands.format(inputTokens, outputTokens)
-                + ansi.reset());
+    /** Muted per-turn totals line; printed only after the spinner is fully erased. */
+    private void printTurnUsage(long inputTokens, long outputTokens, long elapsedNanos) {
+        out.println(ansi.muted() + StatsCommands.compact(inputTokens, outputTokens)
+                + " · " + Spinner.duration(elapsedNanos) + ansi.reset());
         out.flush();
     }
 
@@ -573,7 +573,7 @@ final class InteractiveShell implements QuestionFlow {
         }
         cancelled.set(false);
         refreshColumns(false);
-        Spinner spinner = new Spinner(out, ansi, clock, SPINNER_INTERVAL_NANOS);
+        Spinner spinner = new Spinner(out, ansi, clock, SPINNER_INTERVAL_NANOS, "Compacting…");
         TranscriptPresenter presenter = new TranscriptPresenter(out, ansi, columns, spinner);
         AtomicReference<CompactCommands.Result> result = new AtomicReference<>();
         AtomicReference<Throwable> failure = new AtomicReference<>();
@@ -830,37 +830,39 @@ final class InteractiveShell implements QuestionFlow {
     }
 
     /**
-     * One frame: optional status hint, optional slash menu, then the composer
-     * rows; cursor returns inside the composer. Overlay rows erase cleanly
-     * because the block top is tracked exactly via {@link #cursorRowFromTop}.
+     * One frame: pending attachments, the bordered composer, then the slash
+     * menu and status hint beneath it; cursor returns inside the composer.
+     * Rows erase cleanly because the block top is tracked exactly via
+     * {@link #cursorRowFromTop}.
      */
     private void render() {
         refreshColumns(false);
-        VisualLayout layout = VisualLayout.of(composer.text(), columns);
+        VisualLayout layout = InputBox.layout(composer.text(), columns);
         VisualLayout.Position cursor = layout.cursorAt(composer.cursor());
         List<VisualLayout.Row> rows = layout.rows();
         String hint = StatusLines.hint(config.model(), modeLabel(), session.id(),
-                Math.max(1, columns), ansi);
-        List<String> menuRows = menu.active() ? composeMenuRows() : List.<String>of();
-        List<String> pendingRows = composePendingRows();
-        StringBuilder frame = new StringBuilder();
-        frame.append(ansi.cursorUp(cursorRowFromTop));
-        if (!hint.isEmpty()) frame.append('\r').append(ansi.eraseLine()).append(hint).append('\n');
-        for (String row : menuRows) {
-            frame.append('\r').append(ansi.eraseLine()).append(row).append('\n');
-        }
-        for (String row : pendingRows) {
-            frame.append('\r').append(ansi.eraseLine()).append(row).append('\n');
-        }
+                Math.max(1, columns - 2), ansi);
+        List<String> above = composePendingRows();
+        List<String> below = new ArrayList<>(menu.active() ? composeMenuRows() : List.<String>of());
+        if (!hint.isEmpty()) below.add("  " + hint);
+        List<String> lines = new ArrayList<>(above);
+        lines.add(InputBox.top(columns, ansi));
         String text = composer.text();
         for (int index = 0; index < rows.size(); index++) {
-            frame.append('\r').append(ansi.eraseLine());
-            if (index == 0) frame.append(promptStyled());
-            frame.append(text, rows.get(index).startOffset, trailingBoundary(text, rows.get(index)));
-            if (index < rows.size() - 1) frame.append('\n');
+            String segment = text.substring(rows.get(index).startOffset, trailingBoundary(text, rows.get(index)));
+            lines.add(InputBox.row(segment, index == 0, columns, ansi));
         }
-        int totalRows = rows.size() + menuRows.size() + pendingRows.size() + (hint.isEmpty() ? 0 : 1);
-        int upToCursor = rows.size() - 1 - cursor.row();
+        lines.add(InputBox.bottom(columns, ansi));
+        lines.addAll(below);
+        StringBuilder frame = new StringBuilder();
+        frame.append(ansi.cursorUp(cursorRowFromTop));
+        for (int index = 0; index < lines.size(); index++) {
+            frame.append('\r').append(ansi.eraseLine()).append(lines.get(index));
+            if (index < lines.size() - 1) frame.append('\n');
+        }
+        int totalRows = lines.size();
+        int cursorRow = above.size() + 1 + cursor.row();
+        int upToCursor = totalRows - 1 - cursorRow;
         if (renderedRows > totalRows) {
             // The frame shrank (menu closed, text unwrapped): erase the stale tail.
             int surplus = renderedRows - totalRows;
@@ -873,11 +875,11 @@ final class InteractiveShell implements QuestionFlow {
         }
         frame.append('\r')
                 .append(ansi.cursorForward(Math.min(columns - 1,
-                        VisualLayout.PROMPT_CELLS + cursor.column())));
+                        InputBox.LEFT_CELLS + cursor.column())));
         out.print(frame);
         out.flush();
         renderedRows = totalRows;
-        cursorRowFromTop = totalRows - rows.size() + cursor.row();
+        cursorRowFromTop = cursorRow;
     }
 
     /** One dim pending line per staged attachment, rendered between menu and composer. */
@@ -935,14 +937,12 @@ final class InteractiveShell implements QuestionFlow {
             cleanup.append('\r').append(ansi.eraseLine());
             if (index < renderedRows - 1) cleanup.append('\n');
         }
+        // Return to the block's top row so the next output reuses the space.
+        cleanup.append(ansi.cursorUp(renderedRows - 1)).append('\r');
         out.print(cleanup);
         out.flush();
         renderedRows = 0;
         cursorRowFromTop = 0;
-    }
-
-    private String promptStyled() {
-        return ansi.dim() + "› " + ansi.reset();
     }
 
     /** Two-line styled welcome replacing the legacy banner in raw mode. */
