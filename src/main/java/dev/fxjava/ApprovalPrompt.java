@@ -7,7 +7,8 @@ import java.util.Locale;
 
 /**
  * Inline approval prompt for the raw terminal, styled after fx's approval
- * footer: tool name bold in a bordered box with the preview wrapped inside and
+ * footer: tool name bold in a bordered box with the preview wrapped inside
+ * (long previews collapse after a few rows into a muted count) and
  * the option legend on the bottom border. Decision mapping and grant-key
  * normalization are pure so they stay unit-testable without a terminal.
  */
@@ -21,6 +22,8 @@ final class ApprovalPrompt {
     }
 
     private static final String OPTIONS = "y yes · n no · a always this session";
+    /** Preview rows shown before the rest collapses into one muted count row. */
+    static final int MAX_PREVIEW_ROWS = 6;
 
     private ApprovalPrompt() {
     }
@@ -83,11 +86,16 @@ final class ApprovalPrompt {
         int dashes = Math.max(1, width - 12 - toolCells);
         top.append("─".repeat(dashes)).append("┐");
         lines.add(top.toString());
-        for (String row : wrap(flatten(preview), Math.max(1, width - 4))) {
-            int padding = Math.max(0, width - 4 - MarkdownConsole.visibleWidth(row));
-            lines.add("│ " + row + " ".repeat(padding) + " │");
+        List<String> rows = wrap(flatten(preview), Math.max(1, width - 4));
+        int hidden = rows.size() > MAX_PREVIEW_ROWS ? rows.size() - (MAX_PREVIEW_ROWS - 1) : 0;
+        for (String row : hidden > 0 ? rows.subList(0, MAX_PREVIEW_ROWS - 1) : rows) {
+            lines.add(boxRow(row, row, width));
         }
-        String options = ToolGroupLines.truncate(OPTIONS, Math.max(1, width - 5));
+        if (hidden > 0) {
+            String more = ToolGroupLines.truncate("… " + hidden + " more rows", Math.max(1, width - 4));
+            lines.add(boxRow(ansi.muted() + more + ansi.reset(), more, width));
+        }
+        String options = ToolGroupLines.truncate(OPTIONS, Math.max(1, width - 6));
         int optionsCells = MarkdownConsole.visibleWidth(options);
         int tail = Math.max(1, width - 5 - optionsCells);
         lines.add("└─ " + options + " " + "─".repeat(tail) + "┘");
@@ -96,7 +104,16 @@ final class ApprovalPrompt {
         return new Box(lines);
     }
 
-    /** Erases every box row, leaving the cursor at the start of the bottom row. */
+    /** One bordered row; {@code plain} is the unstyled text used for padding. */
+    private static String boxRow(String styled, String plain, int width) {
+        int padding = Math.max(0, width - 4 - MarkdownConsole.visibleWidth(plain));
+        return "│ " + styled + " ".repeat(padding) + " │";
+    }
+
+    /**
+     * Erases every box row, then returns to the start of the row the box was
+     * opened beneath, so the caller can rewrite its running-tool line in place.
+     */
     static void erase(PrintStream out, Ansi ansi, Box box) {
         StringBuilder cleanup = new StringBuilder();
         cleanup.append(ansi.cursorUp(box.rows));
@@ -105,6 +122,7 @@ final class ApprovalPrompt {
             if (index < box.rows - 1) cleanup.append('\n');
         }
         cleanup.append('\r').append(ansi.eraseLine());
+        cleanup.append(ansi.cursorUp(box.rows)).append('\r');
         out.print(cleanup);
     }
 

@@ -29,6 +29,9 @@ class StatsCommandsTest {
     void formatMatchesTheSharedTokensLine() {
         assertEquals("1234 in · 567 out · 1801 total", StatsCommands.format(1234, 567));
         assertEquals("0 in · 0 out · 0 total", StatsCommands.format(0, 0));
+        assertEquals("↑ 999 ↓ 0", StatsCommands.compact(999, 0));
+        assertEquals("↑ 1.2k ↓ 48k", StatsCommands.compact(1_234, 48_900));
+        assertEquals("↑ 2k ↓ 3.4M", StatsCommands.compact(2_000, 3_456_789));
     }
 
     @Test

@@ -5,8 +5,9 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Presents one agent turn on the raw terminal: braille spinner while nothing
- * new is showing, live tool-group lines rewritten in place, and markdown
+ * Presents one agent turn on the raw terminal: shimmering thinking indicator
+ * while nothing new is showing, live tool-group lines rewritten in place with
+ * their preview and duration, and markdown
  * rendered from complete lines only. All output funnels through one monitor so
  * spinner frames and content never interleave; the spinner is always fully
  * erased before any content prints.
@@ -20,6 +21,8 @@ final class TranscriptPresenter {
     private final Object lock = new Object();
     private final StringBuilder pendingLine = new StringBuilder();
     private final List<String> blockLines = new ArrayList<>();
+    private String toolPreview = "";
+    private long toolStartedAt;
     private boolean inFence;
     private boolean separateNext;
     private boolean closed;
@@ -67,6 +70,8 @@ final class TranscriptPresenter {
         synchronized (lock) {
             if (closed) return;
             spinner.stop();
+            toolPreview = preview == null ? "" : preview;
+            toolStartedAt = spinner.now();
             out.print(ToolGroupLines.running(name, preview, columns, ansi));
             out.flush();
         }
@@ -78,7 +83,8 @@ final class TranscriptPresenter {
             if (closed) return;
             out.print('\r');
             out.print(ansi.eraseLine());
-            out.print(ToolGroupLines.completed(name, "", error, columns, ansi));
+            String elapsed = Spinner.shortDuration(spinner.now() - toolStartedAt);
+            out.print(ToolGroupLines.completed(name, toolPreview, elapsed, error, columns, ansi));
             out.println();
             out.flush();
             separateNext = true;
