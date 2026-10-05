@@ -25,6 +25,7 @@ public final class Main {
     }
 
     public static void main(String[] args) {
+        WindowsNetworkDefaults.apply(System.getenv(), System.getProperties());
         try {
             int exitCode = run(args, System.getenv(), System.out, System.err);
             if (exitCode != 0) System.exit(exitCode);

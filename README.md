@@ -182,6 +182,20 @@ Permit file mutations and shell commands without interactive confirmation:
 java -jar target/java-agent.jar --yes "Fix the failing tests"
 ```
 
+On Windows the agent uses the system proxy (`java.net.useSystemProxies=true`)
+and trusts the Windows certificate store (`javax.net.ssl.trustStoreType=Windows-ROOT`),
+so corporate proxies and TLS-inspecting gateways work without extra flags.
+Explicit `-Dhttps.proxyHost`, `-Djava.net.useSystemProxies`,
+`-Djavax.net.ssl.trustStore`, or `-Djavax.net.ssl.trustStoreType` settings take
+precedence. Set `JAVA_AGENT_SYSTEM_NETWORK=0` to keep the JDK defaults.
+
+Azure OpenAI works through its v1 endpoint; use the deployment name as the model:
+
+```powershell
+$env:OPENAI_BASE_URL="https://<resource>.openai.azure.com/openai/v1"
+$env:OPENAI_MODEL="<deployment-name>"
+```
+
 Choose a model or an approved corporate OpenAI API proxy:
 
 ```sh
