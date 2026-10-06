@@ -34,7 +34,8 @@ public final class Main {
         if (WindowsConsole.isWindows()) {
             List<String> unbound = new ArrayList<>();
             WindowsConsole.Api api = WindowsConsole.api(unbound::add);
-            binding = "; console API: " + (api != null ? api.name() : unbound.get(0));
+            // With no binding, the probe below already reports why.
+            if (api != null) binding = "; console API: " + api.name();
         }
         if (!rawTerminalEnabled(environment)) return "plain prompt: disabled by JAVA_AGENT_RAW_TERMINAL" + binding;
         if ("dumb".equals(environment.get("TERM"))) return "plain prompt: TERM=dumb" + binding;

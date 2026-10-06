@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
+import java.lang.module.ModuleFinder;
 import java.lang.reflect.Method;
 import java.util.Arrays;
 
@@ -14,7 +15,10 @@ import java.util.Arrays;
  * (JLine's {@code Kernel32Impl}, backed by {@code le.dll} in the JDK's bin
  * directory), so no DLL is unpacked anywhere. The package is not exported:
  * the jar manifest opens it with {@code Add-Opens}. Present from JDK
- * 11.0.14 through 21; {@link #create()} throws on JDKs without it.
+ * 11.0.14 through 21; {@link #create()} throws on JDKs without it. Only
+ * jshell requires the module, so a JRE never resolves it by default: the
+ * Windows launcher adds {@code --add-modules jdk.internal.le} when the
+ * runtime's {@code release} file lists it.
  *
  * <p>Keys are read as raw bytes from standard input. With line input off the
  * console returns them as typed, already UTF-8 under the launcher's UTF-8
@@ -22,6 +26,7 @@ import java.util.Arrays;
  * writes {@code int} values into {@code char} fields.
  */
 final class JdkConsoleApi implements WindowsConsole.Api {
+    private static final String MODULE = "jdk.internal.le";
     private static final String PACKAGE = "jdk.internal.org.jline.terminal.impl.jna.win.";
     private static final int STD_INPUT_HANDLE = -10;
     private static final int STD_OUTPUT_HANDLE = -11;
@@ -69,6 +74,13 @@ final class JdkConsoleApi implements WindowsConsole.Api {
 
     /** Binds the JDK natives; throws when the JDK lacks them or the package is not opened. */
     static JdkConsoleApi create() throws ReflectiveOperationException {
+        if (ModuleLayer.boot().findModule(MODULE).isEmpty()) {
+            // A JRE without jshell ships the module but never resolves it.
+            throw new ClassNotFoundException(ModuleFinder.ofSystem().find(MODULE).isPresent()
+                    ? MODULE + " is in this runtime but not loaded; start Java with --add-modules "
+                        + MODULE + " (java-agent.cmd does this)"
+                    : MODULE + " is not in this runtime");
+        }
         return new JdkConsoleApi();
     }
 

@@ -15,7 +15,9 @@ of the full-screen manager.
   API saves both console modes, then clears line input, echo, and processed
   input and enables VT input and output processing. The API is bound through
   the JDK's own `jdk.internal.le` natives (opened by the jar manifest's
-  `Add-Opens`; JDK 11.0.14 through 21) and falls back to JNA, whose DLL
+  `Add-Opens`; JDK 11.0.14 through 21; a JRE without jshell never loads the
+  module, so the Windows launcher adds `--add-modules jdk.internal.le` when
+  the runtime's `release` file lists it) and falls back to JNA, whose DLL
   unpacks into the temp directory and can be refused. Windows keys arrive on
   a reader thread (the JDK's console `available()` stays zero until Enter)
   and the size comes from the console window. Any failure falls back cleanly

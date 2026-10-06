@@ -79,7 +79,7 @@ final class WindowsConsole {
             jdkFailure = unavailable.toString();
         }
         try {
-            return new Kernel32Api();
+            return new Kernel32Api(jdkFailure);
         } catch (LinkageError | RuntimeException unavailable) {
             declined.accept("no console API binding loaded (JDK jdk.internal.le: " + jdkFailure
                     + "; JNA: " + unavailable + ")");
@@ -178,10 +178,16 @@ final class WindowsConsole {
         private final Pointer output = kernel.GetStdHandle(STD_OUTPUT_HANDLE);
         private final Memory readBuffer = new Memory(READ_CHARS * 2L);
         private final StringBuilder carry = new StringBuilder();
+        private final String jdkFailure;
+
+        /** {@code jdkFailure} says why the preferred JDK binding was skipped. */
+        Kernel32Api(String jdkFailure) {
+            this.jdkFailure = jdkFailure;
+        }
 
         @Override
         public String name() {
-            return "JNA";
+            return "JNA (JDK jdk.internal.le skipped: " + jdkFailure + ")";
         }
 
         @Override
