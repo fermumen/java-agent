@@ -1,0 +1,6 @@
+node_modules/
+out/
+session.bin
+marks.json
+package*.json
+*.ttf

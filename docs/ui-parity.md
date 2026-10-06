@@ -5,7 +5,9 @@ experience (`src/ui/`): the transcript, prompts, approvals, and question
 panels stay in the normal buffer and scrollback, styled with fx's
 deliberately small ANSI subset through a single `Ansi` helper. This document
 records exactly what the interactive UX covers today and where it stops short
-of the full-screen manager.
+of the full-screen manager. `terminal-ui-notes.md` keeps the reasoning, the
+Windows console diagnosis steps, and open work; `tools/ui-screenshots`
+renders real frames for visual checks.
 
 ## Ported contracts
 
