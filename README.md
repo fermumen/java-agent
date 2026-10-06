@@ -98,7 +98,8 @@ java -jar "target/productivity.jar" report.bsh input.xlsx
 
 The bundle contains BeanShell 2.0b6, Apache POI, PDFBox, Tika Core, Commons CSV/IO/Compress/Lang/
 Text/Codec/Math, Jackson JSON and YAML, jsoup, commonmark with GFM tables,
-selected TwelveMonkeys ImageIO plugins, XZ, and XChart. It intentionally omits
+selected TwelveMonkeys ImageIO plugins, XZ, XChart, and Oracle Thin / Microsoft
+SQL Server JDBC drivers (no native-login DLL). It intentionally omits
 native/JNI dependencies and Tika's full parser package.
 
 ## Configure and run

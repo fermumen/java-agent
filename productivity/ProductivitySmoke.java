@@ -11,9 +11,12 @@ import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.Driver;
+import java.sql.DriverManager;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.Iterator;
+import java.util.ServiceLoader;
 import java.util.concurrent.TimeUnit;
 import javax.imageio.ImageIO;
 import javax.imageio.ImageReader;
@@ -77,6 +80,7 @@ public final class ProductivitySmoke {
             validateCsv(artifacts.resolve("roundtrip.csv"));
             validateChart(artifacts.resolve("chart.png"));
             validateImageIoServiceMetadata();
+            validateJdbcDrivers();
             validateBeanShellRunner(artifacts);
         } finally {
             deleteTree(artifacts);
@@ -196,12 +200,35 @@ public final class ProductivitySmoke {
         require(twelveMonkeys, "TwelveMonkeys ImageIO service metadata was not preserved");
     }
 
+    private static void validateJdbcDrivers() throws Exception {
+        // Check the merged JDBC service descriptor before any explicit driver loading.
+        boolean oracle = false;
+        boolean sqlServer = false;
+        for (Driver driver : ServiceLoader.load(Driver.class)) {
+            if (driver.getClass().getName().equals("oracle.jdbc.OracleDriver")) oracle = true;
+            if (driver.getClass().getName().equals("com.microsoft.sqlserver.jdbc.SQLServerDriver")) sqlServer = true;
+        }
+        require(oracle && sqlServer, "JDBC driver service metadata was not preserved");
+        require(DriverManager.getDriver("jdbc:oracle:thin:@//localhost:1521/service")
+                .getClass().getName().equals("oracle.jdbc.OracleDriver"), "Oracle Thin driver unavailable");
+        require(DriverManager.getDriver("jdbc:sqlserver://localhost:1433;databaseName=example")
+                .getClass().getName().equals("com.microsoft.sqlserver.jdbc.SQLServerDriver"),
+                "SQL Server driver unavailable");
+    }
+
     private static void validateBeanShellRunner(Path directory) throws Exception {
         Path workbook = directory.resolve("bsh-roundtrip.xlsx");
         Path passing = directory.resolve("passing.bsh");
         Files.writeString(passing, String.join("\n",
                 "import java.io.*;",
                 "import java.util.*;",
+                "import java.sql.DriverManager;",
+                "if (!\"oracle.jdbc.OracleDriver\".equals(DriverManager.getDriver("
+                        + "\"jdbc:oracle:thin:@//localhost:1521/service\").getClass().getName()))"
+                        + " throw new IllegalStateException(\"Oracle driver unavailable in BeanShell\");",
+                "if (!\"com.microsoft.sqlserver.jdbc.SQLServerDriver\".equals(DriverManager.getDriver("
+                        + "\"jdbc:sqlserver://localhost:1433;databaseName=example\").getClass().getName()))"
+                        + " throw new IllegalStateException(\"SQL Server driver unavailable in BeanShell\");",
                 "import org.apache.poi.xssf.usermodel.XSSFWorkbook;",
                 "File file = new File(bsh.args[0]);",
                 "XSSFWorkbook workbook = new XSSFWorkbook();",

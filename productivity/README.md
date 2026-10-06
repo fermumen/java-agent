@@ -39,13 +39,43 @@ The deterministic smoke runner, `ProductivitySmoke.java`, is a build-time check.
 Maven compiles it with `javac --release 11`, so newer language features or APIs
 fail the build. It creates temporary XLSX, PDF, DOCX, PPTX, CSV, and chart PNG
 artifacts, reopens or extracts them, and checks their values. It also exercises
-the bundled parser, math, image, text, YAML, and metadata services. It then
-launches `java -jar productivity.jar` child processes to check that a
-BeanShell script can write and reopen a workbook, that a BOM-prefixed script
-runs, and that thrown exceptions, parse errors, evaluation errors, and missing
+the bundled parser, math, image, text, YAML, and metadata services, including
+JDBC service discovery and URL recognition for both drivers without connecting
+to a database. It then launches `java -jar productivity.jar` child processes to check that a
+BeanShell script can discover both JDBC drivers and write and reopen a workbook,
+that a BOM-prefixed script runs, and that thrown exceptions, parse errors, evaluation errors, and missing
 scripts all exit nonzero. No provider, API key, or external service is used.
 
 The smoke checks are deterministic library and artifact-pipeline checks. They
 do not measure answer quality from a live model. They pass on a Linux JDK 11
 build. Windows `cmd.exe` and provider-backed task quality were not evaluated
 here.
+
+## JDBC
+
+The bundle includes these drivers inside `productivity.jar`; no extra classpath
+or runtime download is needed:
+
+| Database | Maven dependency | JDBC URL shape |
+| --- | --- | --- |
+| Oracle (Thin) | `com.oracle.database.jdbc:ojdbc11:23.26.3.0.0` | `jdbc:oracle:thin:@//host:1521/service` |
+| Microsoft SQL Server | `com.microsoft.sqlserver:mssql-jdbc:13.6.0.jre11` | `jdbc:sqlserver://host:1433;databaseName=database;encrypt=true` |
+
+Use `java.sql.DriverManager.getConnection(url, user, password)` from a BeanShell
+script with database username/password credentials. The shaded JAR preserves
+JDBC service registration, so `Class.forName` is not required. Close result sets,
+statements, and connections in `finally` blocks (BeanShell has no
+try-with-resources). Do not put credentials in committed scripts or print them.
+
+SQL Server's `mssql-jdbc_auth` native-login DLL is **not bundled**. Do not use
+`integratedSecurity=true` with the default native authentication scheme or assume
+Windows single sign-on is available. Oracle uses the pure-Java Thin driver, not
+OCI. Optional authentication stacks (such as Microsoft Entra authentication)
+and Oracle wallet companion libraries are not included.
+
+Database TLS trust is separate from the agent's Windows HTTPS transport: JDBC
+does not automatically inherit that transport's Windows certificate-store
+handling. Keep TLS certificate validation enabled and arrange JVM/database
+certificate trust with your administrator rather than disabling validation.
+The offline smoke checks verify driver availability, not live connectivity,
+authentication, or database TLS configuration.

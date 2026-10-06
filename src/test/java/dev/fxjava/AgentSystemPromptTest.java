@@ -42,5 +42,8 @@ class AgentSystemPromptTest {
         assertTrue(prompt.contains("Commons Math:"));
         assertTrue(prompt.contains("TwelveMonkeys ImageIO:"));
         assertTrue(prompt.contains("XChart:"));
+        assertTrue(prompt.contains("JDBC: Oracle Thin and Microsoft SQL Server"));
+        assertTrue(prompt.contains("no native-login DLL is bundled"));
+        assertTrue(prompt.contains("do not assume Windows integrated login is available"));
     }
 }
