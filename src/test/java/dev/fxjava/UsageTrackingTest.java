@@ -266,6 +266,20 @@ class UsageTrackingTest {
                 "max-steps exhaustion persists every consumed token");
     }
 
+    @Test
+    void zeroMaxStepsRunsPastTheOldTwentyStepCap() throws Exception {
+        ObjectNode[] script = new ObjectNode[26];
+        for (int index = 0; index < 25; index++) {
+            script[index] = toolResponse("call-" + index, "echo", "{\"value\":\"x\"}", 1, 1);
+        }
+        script[25] = textResponse("done after 25 tool steps", 1, 1);
+        ScriptedClient client = new ScriptedClient(script);
+        Agent agent = new Agent(json, client, List.of(new EchoTool()), (tool, arguments) -> true,
+                new PrintStream(PrintStream.nullOutputStream()), 0, "instructions");
+        assertEquals("done after 25 tool steps", agent.prompt("keep going"));
+        assertEquals(26, client.requests.size());
+    }
+
     private SessionRuntime runtime(Path workspace, Path state, ObjectNode... responses)
             throws IOException {
         return SessionRuntime.start(agent(client(responses)), new SessionStore(json, state),

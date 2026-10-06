@@ -840,7 +840,7 @@ final class InteractiveShell implements QuestionFlow {
         VisualLayout layout = InputBox.layout(composer.text(), columns);
         VisualLayout.Position cursor = layout.cursorAt(composer.cursor());
         List<VisualLayout.Row> rows = layout.rows();
-        String hint = StatusLines.hint(config.model(), modeLabel(), session.id(),
+        String hint = StatusLines.hint(session.model(), modeLabel(), session.id(),
                 Math.max(1, columns - 2), ansi);
         List<String> above = composePendingRows();
         List<String> below = new ArrayList<>(menu.active() ? composeMenuRows() : List.<String>of());

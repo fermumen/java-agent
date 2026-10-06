@@ -24,6 +24,40 @@ public final class Main {
     private Main() {
     }
 
+    /**
+     * Probes raw mode by entering and immediately restoring it; the detail
+     * names the backend or the reason, and on Windows which console API
+     * binding loads, even when no console is attached.
+     */
+    private static String terminalCheck(Map<String, String> environment) throws InterruptedException {
+        String binding = "";
+        if (WindowsConsole.isWindows()) {
+            List<String> unbound = new ArrayList<>();
+            WindowsConsole.Api api = WindowsConsole.api(unbound::add);
+            // With no binding, the probe below already reports why.
+            if (api != null) binding = "; console API: " + api.name();
+        }
+        if (!rawTerminalEnabled(environment)) return "plain prompt: disabled by JAVA_AGENT_RAW_TERMINAL" + binding;
+        if ("dumb".equals(environment.get("TERM"))) return "plain prompt: TERM=dumb" + binding;
+        List<String> declined = new ArrayList<>();
+        RawTerminal probe = RawTerminal.open(declined::add);
+        if (probe == null) {
+            return "plain prompt: " + (declined.isEmpty() ? "raw mode unavailable" : declined.get(0)) + binding;
+        }
+        TerminalCapabilities.Size size = probe.size();
+        probe.close();
+        return "raw mode available (" + (WindowsConsole.isWindows() ? "Windows console" : "stty")
+                + ", " + size + ", java " + System.getProperty("java.version") + ")" + binding;
+    }
+
+    /** {@code JAVA_AGENT_RAW_TERMINAL=0|false|off} keeps the plain line-mode shell. */
+    static boolean rawTerminalEnabled(Map<String, String> environment) {
+        String value = environment.get("JAVA_AGENT_RAW_TERMINAL");
+        if (value == null) return true;
+        String normalized = value.strip().toLowerCase(Locale.ROOT);
+        return !(normalized.equals("0") || normalized.equals("false") || normalized.equals("off"));
+    }
+
     public static void main(String[] args) {
         WindowsNetworkDefaults.apply(System.getenv(), System.getProperties());
         try {
@@ -183,16 +217,23 @@ public final class Main {
         }
 
         TerminalCapabilities capabilities = TerminalCapabilities.detect(environment);
-        if (capabilities.interactive()) {
-            RawTerminal terminal = RawTerminal.open();
+        if (capabilities.interactive() && rawTerminalEnabled(environment)) {
+            List<String> declined = new ArrayList<>();
+            RawTerminal terminal = RawTerminal.open(declined::add);
+            if (terminal == null && !declined.isEmpty()) {
+                error.println("java-agent: interactive UI unavailable: " + declined.get(0)
+                        + ". Using the plain prompt; run `java-agent doctor` for details,"
+                        + " or set JAVA_AGENT_RAW_TERMINAL=0 to hide this.");
+            }
             if (terminal != null) {
                 try (RawTerminal owned = terminal) {
                     Ansi ansi = Ansi.fromEnvironment(environment, true);
                     InteractiveShell shell = new InteractiveShell(session, config, systemPrompt, mcp,
-                            sessionRoot, standardInput, out, error, ansi, approval,
+                            sessionRoot, owned.input(standardInput), out, error, ansi, approval,
                             modelSource(options, environment, preferences, options.resume),
                             effortSource(options, environment, preferences), System::nanoTime);
-                    return shell.run(owned, capabilities);
+                    // Size through the raw backend: the Windows console has no stty.
+                    return shell.run(owned, TerminalCapabilities.detect(environment, true, owned::size));
                 }
             }
         }
@@ -401,8 +442,14 @@ public final class Main {
                         environment.get("JAVA_AGENT_API_KEY"), preferences.apiKey()) != null;
                 checks.addObject().put("name", "auth").put("status", authenticated ? "ok" : "fail")
                         .put("detail", authenticated ? "OpenAI API key available" : "OpenAI API key is not configured");
+                String terminal = terminalCheck(environment);
+                boolean terminalOk = terminal.startsWith("raw mode available");
+                checks.addObject().put("name", "terminal").put("status", terminalOk ? "ok" : "warn")
+                        .put("detail", terminal);
                 int failures = (workspaceOk ? 0 : 1) + (authenticated ? 0 : 1);
-                result.put("ok_count", 3 - failures).put("warn_count", 0).put("fail_count", failures);
+                int warnings = terminalOk ? 0 : 1;
+                result.put("ok_count", 4 - failures - warnings).put("warn_count", warnings)
+                        .put("fail_count", failures);
                 break;
             }
             case "skills": {
@@ -471,7 +518,8 @@ public final class Main {
                 throw new IllegalArgumentException("Unknown command: " + options.command);
         }
         if (options.json) out.println(json.writeValueAsString(result));
-        else result.properties().forEach(entry -> out.println(entry.getKey() + "=" + entry.getValue().asText()));
+        else result.properties().forEach(entry -> out.println(entry.getKey() + "="
+                + (entry.getValue().isContainerNode() ? entry.getValue().toString() : entry.getValue().asText())));
         return 0;
     }
 
@@ -717,7 +765,7 @@ public final class Main {
                 + "  --effort <level>      none|minimal|low|medium|high|xhigh|max|default (env: OPENAI_REASONING_EFFORT)\n"
                 + "  --base-url <url>      API base URL (env: OPENAI_BASE_URL; saved: config set base-url)\n"
                 + "  --workspace <path>    Workspace root (default: current directory)\n"
-                + "  --max-steps <count>   Maximum response/tool iterations, 1-100 (default: 20)\n"
+                + "  --max-steps <count>   Maximum response/tool iterations per turn (default: 0, unlimited)\n"
                 + "  --resume <id|last>     Resume a saved session for this workspace\n"
                 + "  --session-root <path>  Session storage root (env: JAVA_AGENT_HOME)\n"
                 + "  --mcp-config <path>    MCP JSON config (default: <session-root>/mcp.json)\n"
@@ -756,7 +804,7 @@ public final class Main {
         String resume;
         String sessionRoot;
         String mcpConfig;
-        int maxSteps = 20;
+        int maxSteps = 0;
         int sessionLimit = 100;
         int sessionCursor;
         PermissionMode permissionMode;

@@ -50,6 +50,23 @@ class MainInfoCommandTest {
     }
 
     @Test
+    void doctorExplainsWhyTheInteractiveUiWouldFallBack() throws Exception {
+        JsonNode doctor = runJson(new String[]{"doctor", "--json", "--workspace", temporary.toString()},
+                Map.of("JAVA_AGENT_HOME", temporary.resolve("state").toString()));
+        JsonNode terminal = null;
+        for (JsonNode check : doctor.path("checks")) if (check.path("name").asText().equals("terminal")) terminal = check;
+        assertTrue(terminal != null, doctor.toString());
+        // Tests run without a console, so the probe must decline and name the reason.
+        assertEquals("warn", terminal.path("status").asText());
+        assertTrue(terminal.path("detail").asText().startsWith("plain prompt: "), terminal.toString());
+        assertEquals(1, doctor.path("warn_count").asInt());
+
+        JsonNode disabled = runJson(new String[]{"doctor", "--json", "--workspace", temporary.toString()},
+                Map.of("JAVA_AGENT_HOME", temporary.resolve("state").toString(), "JAVA_AGENT_RAW_TERMINAL", "off"));
+        assertTrue(disabled.path("checks").toString().contains("disabled by JAVA_AGENT_RAW_TERMINAL"));
+    }
+
+    @Test
     void doctorAndStatusReflectSavedSettingsWithoutPrintingTheApiKey() throws Exception {
         Path home = temporary.resolve("saved-config");
         UserPreferences.empty(home).withApiKey("private-test-key")

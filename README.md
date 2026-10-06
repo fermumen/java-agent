@@ -120,7 +120,10 @@ run and restores the previous code page on exit, because some JREs (for
 example IBM Semeru) otherwise write the ANSI code page to an OEM-code-page
 console and garble non-ASCII output. Set `JAVA_AGENT_CONSOLE_UTF8=0` to skip
 this. When running `java -jar` directly on such a JRE, run `chcp 65001` first
-and pass `-Dfile.encoding=UTF-8`. Enforced Group Policy or AppLocker rules can
+and pass `-Dfile.encoding=UTF-8`. The interactive shell puts the Windows
+console (Windows Terminal or conhost) into raw mode through the console API
+for the bordered composer, live spinner, and slash menu; set
+`JAVA_AGENT_RAW_TERMINAL=0` to use the plain line prompt instead. Enforced Group Policy or AppLocker rules can
 still block execution. The command keeps the calling directory as the
 workspace, so `java-agent ask "Inspect this folder"` works from any directory;
 use `--workspace` to select another one.

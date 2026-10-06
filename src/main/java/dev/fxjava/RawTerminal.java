@@ -1,41 +1,78 @@
 package dev.fxjava;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 /**
- * Raw-mode terminal control via {@code stty}. Saves the exact {@code stty -g}
- * state before entering raw mode, restores exactly that state on close, and
- * keeps a JVM shutdown hook as a safety net. Reports unsupported cleanly when
- * stty is missing or fails so callers can fall back to line input.
+ * Raw-mode terminal control: {@code stty} on Unix-like systems, the console
+ * API ({@link WindowsConsole}) on Windows. Saves the exact prior state before
+ * entering raw mode, restores exactly that state on close, and keeps a JVM
+ * shutdown hook as a safety net. Reports unsupported cleanly so callers can
+ * fall back to line input.
  */
 final class RawTerminal implements AutoCloseable {
-    private final Stty stty;
-    private final String savedState;
+    /** Puts the terminal back exactly as it was found. */
+    interface Restore {
+        void run() throws InterruptedException;
+    }
+
+    private final Restore restorer;
     private final TerminalCapabilities.SizeSource sizeSource;
+    private final InputStream input;
     private final Thread shutdownHook;
     private boolean closed;
 
-    private RawTerminal(Stty stty, String savedState, TerminalCapabilities.SizeSource sizeSource) {
-        this.stty = stty;
-        this.savedState = savedState;
+    private RawTerminal(Restore restore, TerminalCapabilities.SizeSource sizeSource, InputStream input) {
+        this.restorer = restore;
         this.sizeSource = sizeSource;
+        this.input = input;
         this.shutdownHook = new Thread(this::restoreQuietly, "raw-terminal-restore");
         Runtime.getRuntime().addShutdownHook(shutdownHook);
     }
 
-    /** Enters raw mode on the controlling terminal, or returns null when unsupported. */
-    static RawTerminal open() throws InterruptedException {
-        if (System.console() == null) return null;
-        return open(new SttyRunner(), new TerminalCapabilities.SttySizeSource());
+    /** A raw session whose keys arrive on {@code input} instead of standard input. */
+    static RawTerminal of(Restore restore, TerminalCapabilities.SizeSource sizeSource, InputStream input) {
+        return new RawTerminal(restore, sizeSource, input);
+    }
+
+    /**
+     * Enters raw mode on the controlling terminal, or returns null after
+     * telling {@code declined} why, so a fallback is never silent.
+     */
+    static RawTerminal open(Consumer<String> declined) throws InterruptedException {
+        if (System.console() == null) {
+            declined.accept("Java sees no console (input or output is redirected)");
+            return null;
+        }
+        if (WindowsConsole.isWindows()) return WindowsConsole.open(declined);
+        return open(new SttyRunner(), new TerminalCapabilities.SttySizeSource(), declined);
     }
 
     static RawTerminal open(Stty stty, TerminalCapabilities.SizeSource sizeSource) throws InterruptedException {
+        return open(stty, sizeSource, reason -> { });
+    }
+
+    static RawTerminal open(Stty stty, TerminalCapabilities.SizeSource sizeSource, Consumer<String> declined)
+            throws InterruptedException {
         String saved = stty.runCapture("stty", "-g");
-        if (saved == null || saved.isBlank()) return null;
-        if (!stty.runInherit("stty", "raw", "-echo")) return null;
-        return new RawTerminal(stty, saved.trim(), sizeSource);
+        if (saved == null || saved.isBlank()) {
+            declined.accept("stty -g could not read the terminal state");
+            return null;
+        }
+        if (!stty.runInherit("stty", "raw", "-echo")) {
+            declined.accept("stty raw -echo failed");
+            return null;
+        }
+        String state = saved.trim();
+        return new RawTerminal(() -> stty.runInherit("stty", state), sizeSource, null);
+    }
+
+    /** Where keys arrive: the backend's own stream, or {@code standardInput}. */
+    InputStream input(InputStream standardInput) {
+        return input == null ? standardInput : input;
     }
 
     TerminalCapabilities.Size size() {
@@ -65,7 +102,7 @@ final class RawTerminal implements AutoCloseable {
 
     private void restore() {
         try {
-            stty.runInherit("stty", savedState);
+            restorer.run();
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
         }

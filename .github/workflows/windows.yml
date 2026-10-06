@@ -16,6 +16,25 @@ jobs:
           cache: maven
       - run: mvn -B clean verify
       - run: mvn -B -f productivity/pom.xml clean verify
+      - name: Shaded jar binds the JDK console API
+        shell: pwsh
+        run: |
+          $doctor = java -jar target/java-agent.jar doctor | Out-String
+          Write-Output $doctor
+          if ($doctor -notmatch 'console API: JDK jdk\.internal\.le') { throw 'JDK console binding did not load from the shaded jar' }
+      - name: Launcher binds the JDK console API on a JRE without jshell
+        shell: pwsh
+        run: |
+          # Like IBM Semeru's JRE: jdk.internal.le ships, but nothing loads it by default.
+          $modules = (java --list-modules | ForEach-Object { ($_ -split '@')[0] } | Where-Object { $_ -ne 'jdk.jshell' }) -join ','
+          jlink --add-modules $modules --output jre-no-jshell --no-header-files --no-man-pages
+          $plain = & .\jre-no-jshell\bin\java.exe -jar target/java-agent.jar doctor | Out-String
+          Write-Output $plain
+          if ($plain -notmatch 'not loaded; start Java with --add-modules jdk\.internal\.le') { throw 'plain java -jar should explain the unresolved module' }
+          $env:JAVA_HOME = (Resolve-Path .\jre-no-jshell).Path
+          $launched = cmd /c java-agent.cmd doctor | Out-String
+          Write-Output $launched
+          if ($launched -notmatch 'console API: JDK jdk\.internal\.le') { throw 'launcher did not resolve jdk.internal.le' }
       - name: Upload agent distribution
         uses: actions/upload-artifact@v4
         with:

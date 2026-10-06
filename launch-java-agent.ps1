@@ -50,8 +50,24 @@ if ($env:JAVA_AGENT_CONSOLE_UTF8 -notin @('0', 'false', 'off')) {
     }
 }
 
+# The interactive UI binds the Windows console through jdk.internal.le, the
+# module jshell uses. A JRE without jshell ships it but never loads it, and a
+# jar manifest cannot add modules, so request it here; only when the runtime's
+# release file lists it, because naming a missing module aborts Java startup.
+$moduleOptions = @()
+if ($env:JAVA_AGENT_RAW_TERMINAL -notin @('0', 'false', 'off')) {
+    $releaseFile = Join-Path (Split-Path (Split-Path $javaPath -Parent) -Parent) 'release'
+    try {
+        if ((Get-Content -LiteralPath $releaseFile -Raw -ErrorAction Stop) -match 'MODULES="[^"]*\bjdk\.internal\.le\b') {
+            $moduleOptions = @('--add-modules', 'jdk.internal.le')
+        }
+    } catch {
+        # No release file: keep the default module graph (JNA fallback still applies).
+    }
+}
+
 try {
-    & $javaPath @javaOptions -jar $jarPath @args
+    & $javaPath @moduleOptions @javaOptions -jar $jarPath @args
     $javaExitCode = $LASTEXITCODE
 } catch {
     [Console]::Error.WriteLine('java-agent: could not start Java: ' + $_.Exception.Message)
