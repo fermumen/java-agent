@@ -765,7 +765,7 @@ public final class Main {
                 + "  --effort <level>      none|minimal|low|medium|high|xhigh|max|default (env: OPENAI_REASONING_EFFORT)\n"
                 + "  --base-url <url>      API base URL (env: OPENAI_BASE_URL; saved: config set base-url)\n"
                 + "  --workspace <path>    Workspace root (default: current directory)\n"
-                + "  --max-steps <count>   Maximum response/tool iterations, 1-100 (default: 20)\n"
+                + "  --max-steps <count>   Maximum response/tool iterations per turn (default: 0, unlimited)\n"
                 + "  --resume <id|last>     Resume a saved session for this workspace\n"
                 + "  --session-root <path>  Session storage root (env: JAVA_AGENT_HOME)\n"
                 + "  --mcp-config <path>    MCP JSON config (default: <session-root>/mcp.json)\n"
@@ -804,7 +804,7 @@ public final class Main {
         String resume;
         String sessionRoot;
         String mcpConfig;
-        int maxSteps = 20;
+        int maxSteps = 0;
         int sessionLimit = 100;
         int sessionCursor;
         PermissionMode permissionMode;

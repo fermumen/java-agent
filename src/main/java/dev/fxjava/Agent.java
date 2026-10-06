@@ -183,7 +183,8 @@ public final class Agent {
         else addUserMessage(textInput);
         try {
             checkpointHistory(checkpoint);
-            for (int step = 0; step < maxSteps; step++) {
+            // maxSteps 0 means no cap: the turn runs until the model stops calling tools or Ctrl+C.
+            for (int step = 0; maxSteps == 0 || step < maxSteps; step++) {
                 PreparedParentContext prepared = parentContext == null ? null : parentContext.prepare();
                 ArrayNode definitions = buildToolDefinitions(toolCatalog);
                 long fixedRequestTokens = contextBudget.estimateTextTokens(instructions)

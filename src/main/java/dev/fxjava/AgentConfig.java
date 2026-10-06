@@ -48,8 +48,8 @@ public final class AgentConfig {
         }
         ModelSelection selection = new ModelSelection(model, reasoningEffort);
         workspace = workspace.toAbsolutePath().normalize();
-        if (maxSteps < 1 || maxSteps > 100) {
-            throw new IllegalArgumentException("maxSteps must be between 1 and 100");
+        if (maxSteps < 0) {
+            throw new IllegalArgumentException("maxSteps must be 0 (unlimited) or positive");
         }
         if (permissionMode == null) throw new IllegalArgumentException("permissionMode is required");
         ContextBudget contextBudget = new ContextBudget(contextTokenBudget, contextTriggerPercent, imageTokenReserve);
