@@ -43,14 +43,16 @@ class WindowsConsoleTest {
             return true;
         }
 
-        @Override public int lastError() { return 6; }
+        @Override public String name() { return "fake"; }
+
+        @Override public String lastError() { return "error 6"; }
 
         @Override public TerminalCapabilities.Size size() { return new TerminalCapabilities.Size(30, 120); }
 
-        @Override public String read() {
+        @Override public byte[] read() {
             try {
                 String next = reads.take();
-                return next.equals("<eof>") ? null : next;
+                return next.equals("<eof>") ? null : next.getBytes(StandardCharsets.UTF_8);
             } catch (InterruptedException interrupted) {
                 return null;
             }
@@ -88,7 +90,7 @@ class WindowsConsoleTest {
         console.input = null;
         assertNull(WindowsConsole.open(console, declined::add));
         assertTrue(console.calls.isEmpty());
-        assertEquals(List.of("standard input is not a console (GetConsoleMode error 6)"), declined);
+        assertEquals(List.of("standard input is not a console (GetConsoleMode: error 6)"), declined);
     }
 
     @Test
@@ -97,22 +99,32 @@ class WindowsConsoleTest {
         console.inputSettable = false;
         assertNull(WindowsConsole.open(console, declined::add));
         assertEquals("out 3", console.calls.get(console.calls.size() - 1));
-        assertEquals(List.of("the console refused raw VT input (SetConsoleMode error 6)"), declined);
+        assertEquals(List.of("the console refused raw VT input (SetConsoleMode: error 6)"), declined);
     }
 
     @Test
-    void typedTextArrivesAsUtf8WithSplitSurrogatesJoined() throws Exception {
+    void typedBytesArriveInOrderAndAFailedReadEndsTheStream() throws Exception {
         FakeConsole console = new FakeConsole();
         RawTerminal terminal = WindowsConsole.open(console, declined::add);
         InputStream keys = terminal.input(InputStream.nullInputStream());
-        String emoji = "😀";
-        console.reads.add("é\u001b[A" + emoji.charAt(0));
-        console.reads.add(emoji.substring(1) + "\r");
-        byte[] expected = ("é\u001b[A" + emoji + "\r").getBytes(StandardCharsets.UTF_8);
+        console.reads.add("é\u001b[A");
+        console.reads.add("x\r");
+        byte[] expected = "é\u001b[Ax\r".getBytes(StandardCharsets.UTF_8);
         assertArrayEquals(expected, readExactly(keys, expected.length));
         console.reads.add("<eof>");
-        assertEquals(-1, keys.read(), "a failed console read ends the stream");
+        assertEquals(-1, keys.read());
         terminal.close();
+    }
+
+    @Test
+    void utf16ReadsJoinSurrogatePairsSplitAcrossReads() {
+        StringBuilder carry = new StringBuilder();
+        String emoji = "😀";
+        assertArrayEquals("a".getBytes(StandardCharsets.UTF_8), WindowsConsole.utf8("a" + emoji.charAt(0), carry));
+        assertEquals(1, carry.length());
+        assertArrayEquals((emoji + "b").getBytes(StandardCharsets.UTF_8),
+                WindowsConsole.utf8(emoji.substring(1) + "b", carry));
+        assertEquals(0, carry.length());
     }
 
     @Test
@@ -134,13 +146,22 @@ class WindowsConsoleTest {
 
     @Test
     @EnabledOnOs(OS.WINDOWS)
-    void kernel32BindsThroughJnaAndOpenNeverThrows() {
+    void jdkConsoleBindingLoadsAndIsPreferred() throws Exception {
+        // CI's JDK 11 ships jdk.internal.le; the surefire profile opens it like the jar manifest.
+        JdkConsoleApi.create();
+        WindowsConsole.Api api = WindowsConsole.api(declined::add);
+        assertEquals("JDK jdk.internal.le", api.name(), String.valueOf(declined));
+        // CI has no interactive console: opening must decline cleanly and say why.
+        RawTerminal terminal = WindowsConsole.open(api, declined::add);
+        if (terminal != null) terminal.close();
+        else assertEquals(1, declined.size());
+    }
+
+    @Test
+    @EnabledOnOs(OS.WINDOWS)
+    void jnaFallbackBindsKernel32() {
         WindowsConsole.Kernel32 kernel = Native.load("kernel32", WindowsConsole.Kernel32.class);
         assertNotNull(kernel.GetStdHandle(-11));
-        // CI has no interactive console: open() must decline cleanly, never throw.
-        RawTerminal terminal = WindowsConsole.open(declined::add);
-        if (terminal != null) terminal.close();
-        else assertEquals(1, declined.size(), "a declined open always says why");
     }
 
     private static byte[] readExactly(InputStream in, int count) throws Exception {

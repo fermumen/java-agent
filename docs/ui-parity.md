@@ -12,12 +12,15 @@ of the full-screen manager.
 - Raw mode entry: `System.console()` present, `TERM` not `dumb`, and
   `JAVA_AGENT_RAW_TERMINAL` not `0`/`false`/`off`. On Unix `stty` must save
   the exact prior state (`stty -g`) before `raw -echo`; on Windows the console
-  API (through JNA) saves both console modes, then clears line input, echo,
-  and processed input and enables VT input and output processing. Windows
-  keys arrive through `ReadConsoleW` on a reader thread (the JDK's console
-  `available()` stays zero until Enter) and the size comes from the console
-  window. Any failure, including JNA failing to load, falls back cleanly to
-  the line-mode shell banner and prompt.
+  API saves both console modes, then clears line input, echo, and processed
+  input and enables VT input and output processing. The API is bound through
+  the JDK's own `jdk.internal.le` natives (opened by the jar manifest's
+  `Add-Opens`; JDK 11.0.14 through 21) and falls back to JNA, whose DLL
+  unpacks into the temp directory and can be refused. Windows keys arrive on
+  a reader thread (the JDK's console `available()` stays zero until Enter)
+  and the size comes from the console window. Any failure falls back cleanly
+  to the line-mode shell banner, which names the reason once; `java-agent
+  doctor` reports the probe and the binding that loaded.
 - Composer editing: printable insert, Backspace/Delete, Left/Right, Home/End,
   Ctrl+A/E/B/F/D/K/U/W word-and-line kills, Alt+B/F/D/Backspace word motion,
   multi-row visual wrapping with exact cursor placement.

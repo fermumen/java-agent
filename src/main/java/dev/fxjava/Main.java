@@ -24,18 +24,29 @@ public final class Main {
     private Main() {
     }
 
-    /** Probes raw mode by entering and immediately restoring it; the detail names the backend or the reason. */
+    /**
+     * Probes raw mode by entering and immediately restoring it; the detail
+     * names the backend or the reason, and on Windows which console API
+     * binding loads, even when no console is attached.
+     */
     private static String terminalCheck(Map<String, String> environment) throws InterruptedException {
-        if (!rawTerminalEnabled(environment)) return "plain prompt: disabled by JAVA_AGENT_RAW_TERMINAL";
-        String term = environment.get("TERM");
-        if ("dumb".equals(term)) return "plain prompt: TERM=dumb";
+        String binding = "";
+        if (WindowsConsole.isWindows()) {
+            List<String> unbound = new ArrayList<>();
+            WindowsConsole.Api api = WindowsConsole.api(unbound::add);
+            binding = "; console API: " + (api != null ? api.name() : unbound.get(0));
+        }
+        if (!rawTerminalEnabled(environment)) return "plain prompt: disabled by JAVA_AGENT_RAW_TERMINAL" + binding;
+        if ("dumb".equals(environment.get("TERM"))) return "plain prompt: TERM=dumb" + binding;
         List<String> declined = new ArrayList<>();
         RawTerminal probe = RawTerminal.open(declined::add);
-        if (probe == null) return "plain prompt: " + (declined.isEmpty() ? "raw mode unavailable" : declined.get(0));
+        if (probe == null) {
+            return "plain prompt: " + (declined.isEmpty() ? "raw mode unavailable" : declined.get(0)) + binding;
+        }
         TerminalCapabilities.Size size = probe.size();
         probe.close();
         return "raw mode available (" + (WindowsConsole.isWindows() ? "Windows console" : "stty")
-                + ", " + size + ", java " + System.getProperty("java.version") + ")";
+                + ", " + size + ", java " + System.getProperty("java.version") + ")" + binding;
     }
 
     /** {@code JAVA_AGENT_RAW_TERMINAL=0|false|off} keeps the plain line-mode shell. */

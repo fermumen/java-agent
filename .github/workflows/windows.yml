@@ -16,6 +16,12 @@ jobs:
           cache: maven
       - run: mvn -B clean verify
       - run: mvn -B -f productivity/pom.xml clean verify
+      - name: Shaded jar binds the JDK console API
+        shell: pwsh
+        run: |
+          $doctor = java -jar target/java-agent.jar doctor | Out-String
+          Write-Output $doctor
+          if ($doctor -notmatch 'console API: JDK jdk\.internal\.le') { throw 'JDK console binding did not load from the shaded jar' }
       - name: Upload agent distribution
         uses: actions/upload-artifact@v4
         with:

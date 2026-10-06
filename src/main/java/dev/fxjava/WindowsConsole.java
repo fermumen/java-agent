@@ -13,10 +13,14 @@ import java.util.function.Consumer;
  * Raw mode for the Windows console (Windows Terminal, conhost) through the
  * console API, since Windows has no {@code stty}: line input, echo, and
  * Ctrl+C signal processing turn off, VT input and output turn on, and both
- * saved modes restore exactly on close. Keys come from {@code ReadConsoleW}
- * on a daemon thread into a {@link QueuedInputStream}, because the JDK's
- * console {@code available()} reports nothing until Enter is pressed, and
- * UTF-16 reads stay correct whatever the console code page is.
+ * saved modes restore exactly on close. Keys are read on a daemon thread into
+ * a {@link QueuedInputStream}, because the JDK's console {@code available()}
+ * reports nothing until Enter is pressed.
+ *
+ * <p>Two backends reach the console API. The JDK's own {@code jdk.internal.le}
+ * bindings (what jshell uses; JDK 11.0.14+ through 21) come first because
+ * their DLL ships inside the JDK. JNA is the fallback: it unpacks a DLL into
+ * the temp directory, which some JVMs or endpoint policies refuse to bind.
  */
 final class WindowsConsole {
     static final int ENABLE_PROCESSED_INPUT = 0x0001;
@@ -28,6 +32,9 @@ final class WindowsConsole {
 
     /** The console calls raw mode needs; the seam tests replace. */
     interface Api {
+        /** Which binding this is, for doctor output. */
+        String name();
+
         /** Current input mode, or null when stdin is not a console. */
         Integer inputMode();
 
@@ -40,11 +47,11 @@ final class WindowsConsole {
 
         TerminalCapabilities.Size size();
 
-        /** Blocks for the next typed UTF-16 text; null when the read fails. */
-        String read();
+        /** Blocks for the next typed input as UTF-8; null when the read fails. */
+        byte[] read();
 
-        /** The Win32 error code of the last failed call, for fallback diagnostics. */
-        int lastError();
+        /** What the last failed call reported, for fallback diagnostics. */
+        String lastError();
     }
 
     private WindowsConsole() {
@@ -56,38 +63,47 @@ final class WindowsConsole {
 
     /**
      * Enters raw mode on the attached console, or returns null after telling
-     * {@code declined} why: not a console, a refused mode, or JNA unable to load.
+     * {@code declined} why: not a console, a refused mode, or no usable binding.
      */
     static RawTerminal open(Consumer<String> declined) {
-        Api api;
+        Api api = api(declined);
+        return api == null ? null : open(api, declined);
+    }
+
+    /** The first binding that loads, or null after reporting why neither did. */
+    static Api api(Consumer<String> declined) {
+        String jdkFailure;
         try {
-            api = new Kernel32Api();
+            return JdkConsoleApi.create();
+        } catch (ReflectiveOperationException | LinkageError | RuntimeException unavailable) {
+            jdkFailure = unavailable.toString();
+        }
+        try {
+            return new Kernel32Api();
         } catch (LinkageError | RuntimeException unavailable) {
-            // Missing native support, or a locked-down temp directory JNA
-            // cannot unpack its DLL into (see -Djna.tmpdir).
-            declined.accept("JNA could not load the Windows console API: " + unavailable);
+            declined.accept("no console API binding loaded (JDK jdk.internal.le: " + jdkFailure
+                    + "; JNA: " + unavailable + ")");
             return null;
         }
-        return open(api, declined);
     }
 
     static RawTerminal open(Api api, Consumer<String> declined) {
         Integer savedInput = api.inputMode();
         if (savedInput == null) {
-            declined.accept("standard input is not a console (GetConsoleMode error " + api.lastError() + ")");
+            declined.accept("standard input is not a console (GetConsoleMode: " + api.lastError() + ")");
             return null;
         }
         Integer savedOutput = api.outputMode();
         if (savedOutput == null) {
-            declined.accept("standard output is not a console (GetConsoleMode error " + api.lastError() + ")");
+            declined.accept("standard output is not a console (GetConsoleMode: " + api.lastError() + ")");
             return null;
         }
         if (!api.setOutputMode(vtOutputMode(savedOutput))) {
-            declined.accept("the console refused VT output (SetConsoleMode error " + api.lastError() + ")");
+            declined.accept("the console refused VT output (SetConsoleMode: " + api.lastError() + ")");
             return null;
         }
         if (!api.setInputMode(rawInputMode(savedInput))) {
-            declined.accept("the console refused raw VT input (SetConsoleMode error " + api.lastError() + ")");
+            declined.accept("the console refused raw VT input (SetConsoleMode: " + api.lastError() + ")");
             api.setOutputMode(savedOutput);
             return null;
         }
@@ -111,26 +127,30 @@ final class WindowsConsole {
         return saved | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
     }
 
-    /**
-     * Copies console text into the queue as UTF-8 until a read fails or the
-     * queue closes; a high surrogate ending one read waits for its pair.
-     */
+    /** Copies console input into the queue until a read fails or the queue closes. */
     static void pump(Api api, QueuedInputStream keys) {
-        String carry = "";
         while (!keys.closed()) {
-            String chunk = api.read();
+            byte[] chunk = api.read();
             if (chunk == null) {
                 keys.close();
                 return;
             }
-            String text = carry + chunk;
-            carry = "";
-            if (!text.isEmpty() && Character.isHighSurrogate(text.charAt(text.length() - 1))) {
-                carry = text.substring(text.length() - 1);
-                text = text.substring(0, text.length() - 1);
-            }
-            if (!text.isEmpty()) keys.offer(text.getBytes(StandardCharsets.UTF_8));
+            keys.offer(chunk);
         }
+    }
+
+    /**
+     * UTF-8 for one UTF-16 read; a high surrogate ending the read is held in
+     * {@code carry} until its pair arrives with the next one.
+     */
+    static byte[] utf8(String chunk, StringBuilder carry) {
+        String text = carry + chunk;
+        carry.setLength(0);
+        if (!text.isEmpty() && Character.isHighSurrogate(text.charAt(text.length() - 1))) {
+            carry.append(text.charAt(text.length() - 1));
+            text = text.substring(0, text.length() - 1);
+        }
+        return text.getBytes(StandardCharsets.UTF_8);
     }
 
     interface Kernel32 extends StdCallLibrary {
@@ -145,7 +165,8 @@ final class WindowsConsole {
         boolean ReadConsoleW(Pointer handle, Pointer buffer, int toRead, IntByReference read, Pointer control);
     }
 
-    private static final class Kernel32Api implements Api {
+    /** JNA binding; keys come from {@code ReadConsoleW}, so they are UTF-16 whatever the code page. */
+    static final class Kernel32Api implements Api {
         private static final int STD_INPUT_HANDLE = -10;
         private static final int STD_OUTPUT_HANDLE = -11;
         /** CONSOLE_SCREEN_BUFFER_INFO: srWindow's Left/Top/Right/Bottom shorts start at byte 10. */
@@ -156,6 +177,12 @@ final class WindowsConsole {
         private final Pointer input = kernel.GetStdHandle(STD_INPUT_HANDLE);
         private final Pointer output = kernel.GetStdHandle(STD_OUTPUT_HANDLE);
         private final Memory readBuffer = new Memory(READ_CHARS * 2L);
+        private final StringBuilder carry = new StringBuilder();
+
+        @Override
+        public String name() {
+            return "JNA";
+        }
 
         @Override
         public Integer inputMode() {
@@ -193,15 +220,15 @@ final class WindowsConsole {
         }
 
         @Override
-        public int lastError() {
-            return Native.getLastError();
+        public String lastError() {
+            return "error " + Native.getLastError();
         }
 
         @Override
-        public String read() {
+        public byte[] read() {
             IntByReference count = new IntByReference();
             if (!kernel.ReadConsoleW(input, readBuffer, READ_CHARS, count, null)) return null;
-            return new String(readBuffer.getCharArray(0, count.getValue()));
+            return utf8(new String(readBuffer.getCharArray(0, count.getValue())), carry);
         }
     }
 }
