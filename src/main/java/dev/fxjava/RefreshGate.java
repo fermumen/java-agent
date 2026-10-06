@@ -1,8 +1,8 @@
 package dev.fxjava;
 
 /**
- * Throttle for terminal-size probes: shells out at most once per interval
- * unless forced, driven by an injectable clock so tests stay deterministic.
+ * Throttle for terminal-size probes: queries the backend at most once per
+ * interval unless forced, driven by an injectable clock so tests stay deterministic.
  */
 final class RefreshGate {
     private final Spinner.Clock clock;

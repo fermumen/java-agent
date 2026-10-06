@@ -9,7 +9,6 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
@@ -133,15 +132,6 @@ class WindowsConsoleTest {
         RawTerminal terminal = RawTerminal.of(() -> { }, () -> TerminalCapabilities.Size.UNKNOWN, null);
         assertTrue(terminal.input(stdin) == stdin);
         terminal.close();
-    }
-
-    @Test
-    void rawTerminalOptOutAcceptsTheLauncherSpellings() {
-        assertTrue(Main.rawTerminalEnabled(Map.of()));
-        assertTrue(Main.rawTerminalEnabled(Map.of("JAVA_AGENT_RAW_TERMINAL", "1")));
-        for (String off : List.of("0", "false", "OFF", " off ")) {
-            assertFalse(Main.rawTerminalEnabled(Map.of("JAVA_AGENT_RAW_TERMINAL", off)), off);
-        }
     }
 
     @Test

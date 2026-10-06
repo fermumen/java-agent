@@ -10,8 +10,8 @@ import java.util.function.Consumer;
  * Raw-mode terminal control: {@code stty} on Unix-like systems, the console
  * API ({@link WindowsConsole}) on Windows. Saves the exact prior state before
  * entering raw mode, restores exactly that state on close, and keeps a JVM
- * shutdown hook as a safety net. Reports unsupported cleanly so callers can
- * fall back to line input.
+ * shutdown hook as a safety net. Reports unsupported cleanly so the required
+ * raw UI can explain why it could not start.
  */
 final class RawTerminal implements AutoCloseable {
     /** Puts the terminal back exactly as it was found. */
@@ -40,7 +40,7 @@ final class RawTerminal implements AutoCloseable {
 
     /**
      * Enters raw mode on the controlling terminal, or returns null after
-     * telling {@code declined} why, so a fallback is never silent.
+     * telling {@code declined} why, so startup failures are never silent.
      */
     static RawTerminal open(Consumer<String> declined) throws InterruptedException {
         if (System.console() == null) {

@@ -150,9 +150,19 @@ class KeyDecoderTest {
     }
 
     @Test
-    void escapeRestartDoesNotEmitTwice() {
-        assertEquals(List.of(), decoder.feed(bytes("1b1b"), 2));
-        assertEquals(List.of(KeyEvent.of(KeyEvent.Kind.ESCAPE)), decoder.flushPending());
+    void doubleEscapeIsDistinctAndDoesNotConsumeFollowingText() {
+        assertEquals(List.of(KeyEvent.of(KeyEvent.Kind.DOUBLE_ESCAPE), KeyEvent.text("a")),
+                decoder.feed(bytes("1b1b61"), 3));
+        assertEquals(List.of(), decoder.flushPending());
+        assertFalse(decoder.hasPendingSequence());
+    }
+
+    @Test
+    void doubleEscapeSplitAcrossReadsStillDecodes() {
+        assertEquals(List.of(), decoder.feed(bytes("1b"), 1));
+        assertEquals(List.of(KeyEvent.of(KeyEvent.Kind.DOUBLE_ESCAPE)),
+                decoder.feed(bytes("1b"), 1));
+        assertFalse(decoder.hasPendingSequence());
     }
 
     @Test

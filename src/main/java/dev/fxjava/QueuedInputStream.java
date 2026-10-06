@@ -46,10 +46,21 @@ final class QueuedInputStream extends InputStream {
 
     @Override
     public synchronized int read(byte[] target, int offset, int length) {
+        return read(target, offset, length, 0);
+    }
+
+    /** Zero on timeout, EOF only on close; lets the Windows UI poll resize while idle. */
+    synchronized int read(byte[] target, int offset, int length, long timeoutMillis) {
         if (length == 0) return 0;
+        long deadline = System.nanoTime() + timeoutMillis * 1_000_000L;
         while (head == tail && !closed) {
             try {
-                wait();
+                if (timeoutMillis == 0) wait();
+                else {
+                    long remaining = deadline - System.nanoTime();
+                    if (remaining <= 0) return 0;
+                    wait(remaining / 1_000_000L, (int) (remaining % 1_000_000L));
+                }
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
                 return 0;

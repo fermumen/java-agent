@@ -182,7 +182,7 @@ class StatsCommandsTest {
     }
 
     @Test
-    void rawShellAndLegacyShellDispatchStats() throws Exception {
+    void shellDispatchAndRawEntrypointDispatchStats() throws Exception {
         Path workspace = Files.createDirectory(temporary.resolve("dispatch-workspace"));
         Path state = temporary.resolve("dispatch-state");
         SessionRuntime session = SessionRuntime.start(agent(), new SessionStore(json, state),
@@ -204,15 +204,15 @@ class StatsCommandsTest {
         assertTrue(output.contains("Usage: /stats"));
 
         String commands = "/stats\n/exit\n";
-        ByteArrayOutputStream legacyBytes = new ByteArrayOutputStream();
-        Main.run(new String[]{"--workspace", workspace.toString(), "--session-root",
-                        state.resolve("legacy").toString()},
+        ByteArrayOutputStream entrypointBytes = new ByteArrayOutputStream();
+        TestRawShell.run(new String[]{"--workspace", workspace.toString(), "--session-root",
+                        state.resolve("raw-entrypoint").toString()},
                 Map.of("OPENAI_API_KEY", "test-key"),
                 new java.io.ByteArrayInputStream(commands.getBytes(StandardCharsets.UTF_8)),
-                new PrintStream(legacyBytes, true, StandardCharsets.UTF_8),
+                new PrintStream(entrypointBytes, true, StandardCharsets.UTF_8),
                 new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
-        String legacyOutput = legacyBytes.toString(StandardCharsets.UTF_8);
-        assertTrue(legacyOutput.contains("/stats"), "legacy banner names /stats");
-        assertTrue(occurrences(legacyOutput, "in · 0 out · 0 total") >= 1);
+        String entrypointOutput = entrypointBytes.toString(StandardCharsets.UTF_8);
+        assertTrue(entrypointOutput.contains("/stats"), "raw prompt echoes /stats");
+        assertTrue(occurrences(entrypointOutput, "in · 0 out · 0 total") >= 1);
     }
 }

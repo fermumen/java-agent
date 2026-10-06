@@ -176,14 +176,14 @@ class PermissionCommandsTest {
     }
 
     @Test
-    void legacyShellParsesRememberListRevokeAndMalformedInput() throws Exception {
+    void rawEntrypointParsesRememberListRevokeAndMalformedInput() throws Exception {
         Path workspace = Files.createDirectory(temporary.resolve("workspace"));
         Path state = temporary.resolve("state");
         String commands = "/permissions\tremember\tallow write_file {\"path\":\"legacy.md\"}\n"
                 + "/permissions\n/permissions yolo\n/permissions\n/permissions ask\n"
                 + "/permissions revoke 1\n/permissions remember deny write_file nope\n/exit\n";
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        int exit = Main.run(new String[]{"--workspace", workspace.toString(), "--session-root", state.toString()},
+        int exit = TestRawShell.run(new String[]{"--workspace", workspace.toString(), "--session-root", state.toString()},
                 Map.of("OPENAI_API_KEY", "test-key"),
                 new ByteArrayInputStream(commands.getBytes(StandardCharsets.UTF_8)),
                 new PrintStream(bytes, true, StandardCharsets.UTF_8),
@@ -207,7 +207,7 @@ class PermissionCommandsTest {
         ApprovalRouter approval = new ApprovalRouter((tool, arguments) -> false);
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         String commands = "/permissions\n/permissions ask\n/exit\n";
-        int exit = Main.run(new String[]{"--yolo", "--workspace", workspace.toString(),
+        int exit = TestRawShell.run(new String[]{"--yolo", "--workspace", workspace.toString(),
                         "--session-root", state.toString()}, Map.of("OPENAI_API_KEY", "test-key"),
                 new ByteArrayInputStream(commands.getBytes(StandardCharsets.UTF_8)),
                 new PrintStream(output, true, StandardCharsets.UTF_8),
@@ -231,7 +231,7 @@ class PermissionCommandsTest {
     }
 
     @Test
-    void legacySessionTransitionsClearGrantsOnlyAfterSuccess() throws Exception {
+    void rawEntrypointSessionTransitionsClearGrantsOnlyAfterSuccess() throws Exception {
         Path workspace = Files.createDirectory(temporary.resolve("legacy-transition-workspace"));
         Path state = temporary.resolve("legacy-transition-state");
         SessionApprovals grants = new SessionApprovals();
@@ -239,7 +239,7 @@ class PermissionCommandsTest {
         ApprovalRouter approval = new ApprovalRouter((tool, arguments) -> false, grants);
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         String commands = "/permissions\n/new\n/permissions\n/exit\n";
-        int exit = Main.run(new String[]{"--workspace", workspace.toString(),
+        int exit = TestRawShell.run(new String[]{"--workspace", workspace.toString(),
                         "--session-root", state.toString()}, Map.of("OPENAI_API_KEY", "test-key"),
                 new ByteArrayInputStream(commands.getBytes(StandardCharsets.UTF_8)),
                 new PrintStream(bytes, true, StandardCharsets.UTF_8),
@@ -252,13 +252,13 @@ class PermissionCommandsTest {
         SessionApprovals retained = new SessionApprovals();
         retained.grant("write_file", "legacy-failed");
         ApprovalRouter failedApproval = new ApprovalRouter((tool, arguments) -> false, retained);
-        assertThrows(IOException.class, () -> Main.run(new String[]{"--workspace", workspace.toString(),
+        assertThrows(IOException.class, () -> TestRawShell.run(new String[]{"--workspace", workspace.toString(),
                         "--session-root", state.toString()}, Map.of("OPENAI_API_KEY", "test-key"),
                 new ByteArrayInputStream("/resume missing-session\n".getBytes(StandardCharsets.UTF_8)),
                 new PrintStream(PrintStream.nullOutputStream()),
                 new PrintStream(PrintStream.nullOutputStream()), failedApproval));
         assertEquals(1, failedApproval.grantCount(),
-                "legacy failed transition retains the current session grant");
+                "failed raw transition retains the current session grant");
     }
 
     @Test

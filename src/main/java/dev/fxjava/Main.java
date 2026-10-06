@@ -37,25 +37,16 @@ public final class Main {
             // With no binding, the probe below already reports why.
             if (api != null) binding = "; console API: " + api.name();
         }
-        if (!rawTerminalEnabled(environment)) return "plain prompt: disabled by JAVA_AGENT_RAW_TERMINAL" + binding;
-        if ("dumb".equals(environment.get("TERM"))) return "plain prompt: TERM=dumb" + binding;
+        if ("dumb".equals(environment.get("TERM"))) return "raw mode unavailable: TERM=dumb" + binding;
         List<String> declined = new ArrayList<>();
         RawTerminal probe = RawTerminal.open(declined::add);
         if (probe == null) {
-            return "plain prompt: " + (declined.isEmpty() ? "raw mode unavailable" : declined.get(0)) + binding;
+            return "raw mode unavailable: " + (declined.isEmpty() ? "no raw terminal backend" : declined.get(0)) + binding;
         }
         TerminalCapabilities.Size size = probe.size();
         probe.close();
         return "raw mode available (" + (WindowsConsole.isWindows() ? "Windows console" : "stty")
                 + ", " + size + ", java " + System.getProperty("java.version") + ")" + binding;
-    }
-
-    /** {@code JAVA_AGENT_RAW_TERMINAL=0|false|off} keeps the plain line-mode shell. */
-    static boolean rawTerminalEnabled(Map<String, String> environment) {
-        String value = environment.get("JAVA_AGENT_RAW_TERMINAL");
-        if (value == null) return true;
-        String normalized = value.strip().toLowerCase(Locale.ROOT);
-        return !(normalized.equals("0") || normalized.equals("false") || normalized.equals("off"));
     }
 
     public static void main(String[] args) {
@@ -81,6 +72,13 @@ public final class Main {
 
     static int run(String[] args, Map<String, String> environment, InputStream standardInput,
                    PrintStream out, PrintStream error, ApprovalRouter approvalOverride) throws Exception {
+        return run(args, environment, standardInput, out, error, approvalOverride, null);
+    }
+
+    /** The terminal override exercises the real entrypoint without native console access in tests. */
+    static int run(String[] args, Map<String, String> environment, InputStream standardInput,
+                   PrintStream out, PrintStream error, ApprovalRouter approvalOverride,
+                   RawTerminal terminalOverride) throws Exception {
         Options options = Options.parse(args);
         if (options.help) {
             out.print(usage());
@@ -216,113 +214,24 @@ public final class Main {
             return 0;
         }
 
-        TerminalCapabilities capabilities = TerminalCapabilities.detect(environment);
-        if (capabilities.interactive() && rawTerminalEnabled(environment)) {
-            List<String> declined = new ArrayList<>();
-            RawTerminal terminal = RawTerminal.open(declined::add);
-            if (terminal == null && !declined.isEmpty()) {
-                error.println("java-agent: interactive UI unavailable: " + declined.get(0)
-                        + ". Using the plain prompt; run `java-agent doctor` for details,"
-                        + " or set JAVA_AGENT_RAW_TERMINAL=0 to hide this.");
-            }
-            if (terminal != null) {
-                try (RawTerminal owned = terminal) {
-                    Ansi ansi = Ansi.fromEnvironment(environment, true);
-                    InteractiveShell shell = new InteractiveShell(session, config, systemPrompt, mcp,
-                            sessionRoot, owned.input(standardInput), out, error, ansi, approval,
-                            modelSource(options, environment, preferences, options.resume),
-                            effortSource(options, environment, preferences), System::nanoTime);
-                    // Size through the raw backend: the Windows console has no stty.
-                    return shell.run(owned, TerminalCapabilities.detect(environment, true, owned::size));
-                }
-            }
+        List<String> declined = new ArrayList<>();
+        RawTerminal terminal = "dumb".equals(environment.get("TERM")) ? null
+                : terminalOverride == null ? RawTerminal.open(declined::add) : terminalOverride;
+        if (terminal == null) {
+            String reason = "dumb".equals(environment.get("TERM")) ? "TERM=dumb"
+                    : declined.isEmpty() ? "raw mode unavailable" : declined.get(0);
+            error.println("java-agent: a raw terminal is required for the interactive shell: " + reason
+                    + ". Run `java-agent doctor` for details, or use `java-agent ask <prompt>`.");
+            return 2;
         }
-        String activeModelSource = modelSource(options, environment, preferences, options.resume);
-        String activeEffortSource = effortSource(options, environment, preferences);
-        out.println("java-agent " + VERSION + " | " + endpointHost(config.baseUrl()) + " | " + session.model()
-                + " | " + config.workspace());
-        if (session.id() != null) out.println("Session: " + session.id());
-        out.println("Enter a request. Commands: /new, /clear, /sessions, /resume <id|last>, /recover <id>, /rename <title>, /model, /effort, /permissions, /stats, /compact, /image <path>, /mcp list, /exit");
-        while (true) {
-            out.print("> ");
-            out.flush();
-            String line = input.readLine();
-            if (line == null || line.equals("/exit") || line.equals("/quit")) break;
-            boolean persistedCommand = line.equals("/new") || line.equals("/sessions")
-                    || line.equals("/resume") || line.startsWith("/resume ")
-                    || line.startsWith("/recover ") || line.startsWith("/rename ");
-            if (persistedCommand && !session.persistent()) {
-                out.println("Session persistence is disabled by --no-save.");
-                continue;
-            }
-            if (line.equals("/clear")) {
-                session.clear(systemPrompt);
-                out.println("Conversation cleared.");
-            } else if (line.equals("/new")) {
-                session.newSession(config.workspace(), session.model(), systemPrompt);
-                approval.clearSessionGrants();
-                out.println("New session: " + session.id());
-            } else if (line.equals("/resume") || line.startsWith("/resume ")) {
-                String id = line.equals("/resume") ? "last" : line.substring("/resume ".length()).trim();
-                String selectedModel = session.model();
-                boolean keepConfiguredModel = modelSourceWinsOverSession(activeModelSource);
-                session.resume(id, config.workspace());
-                if (keepConfiguredModel) session.setModel(selectedModel);
-                else activeModelSource = "saved session";
-                approval.clearSessionGrants();
-                out.println("Resumed session: " + session.id());
-            } else if (line.startsWith("/recover ")) {
-                String selectedModel = session.model();
-                boolean keepConfiguredModel = modelSourceWinsOverSession(activeModelSource);
-                session.recover(line.substring("/recover ".length()).trim(), config.workspace());
-                if (keepConfiguredModel) session.setModel(selectedModel);
-                else activeModelSource = "saved session";
-                approval.clearSessionGrants();
-                out.println("Recovered as: " + session.id());
-            } else if (line.equals("/sessions")) {
-                List<SessionStore.Snapshot> snapshots = session.sessions(config.workspace(), 20);
-                if (snapshots.isEmpty()) out.println("No saved sessions.");
-                for (SessionStore.Snapshot saved : snapshots) {
-                    String current = saved.id().equals(session.id()) ? " *" : "";
-                    String title = saved.title().isBlank() ? "" : "  " + saved.title();
-                    out.println(saved.id() + current + title);
-                }
-            } else if (line.startsWith("/rename ")) {
-                session.rename(line.substring("/rename ".length()));
-                out.println("Session renamed.");
-            } else if (isCommand(line, "/model")) {
-                activeModelSource = RuntimeSettingCommands.model(session,
-                        line.substring("/model".length()).trim(), sessionRoot,
-                        activeModelSource, out, error);
-            } else if (isCommand(line, "/effort")) {
-                activeEffortSource = RuntimeSettingCommands.effort(session,
-                        line.substring("/effort".length()).trim(), sessionRoot,
-                        activeEffortSource, out, error);
-            } else if (isCommand(line, "/permissions")) {
-                PermissionCommands.handle(session,
-                        line.substring("/permissions".length()),
-                        modeLabel(approval, config.permissionMode()), approval.grantCount(),
-                        Ansi.of(false), out, approval::setPermissionMode);
-            } else if (isCommand(line, "/stats")) {
-                StatsCommands.handle(session, line.substring("/stats".length()), workspace,
-                        Ansi.of(false), out);
-            } else if (isCommand(line, "/compact")) {
-                CompactCommands.handle(session, line.substring("/compact".length()),
-                        Ansi.of(false), out, error);
-            } else if (isCommand(line, "/image")) {
-                ImageCommands.handle(session, line.substring("/image".length()), workspace,
-                        Ansi.of(false), out);
-            } else if (line.equals("/mcp") || line.equals("/mcp list")) {
-                out.print(mcp.healthText());
-            } else if (!line.isBlank()) {
-                try {
-                    writeAnswer(session, line, out, false, json);
-                } catch (IOException errorResponse) {
-                    error.println("java-agent: " + safeMessage(errorResponse));
-                }
-            }
+        try (RawTerminal owned = terminal) {
+            Ansi ansi = Ansi.fromEnvironment(environment, true);
+            InteractiveShell shell = new InteractiveShell(session, config, systemPrompt, mcp,
+                    sessionRoot, owned.input(standardInput), out, error, ansi, approval,
+                    modelSource(options, environment, preferences, options.resume),
+                    effortSource(options, environment, preferences), System::nanoTime);
+            return shell.run(owned, TerminalCapabilities.detect(environment, true, owned::size));
         }
-        return 0;
         }
         }
     }
@@ -622,16 +531,6 @@ public final class Main {
         return "default";
     }
 
-    private static boolean modelSourceWinsOverSession(String source) {
-        return source.equals("--model flag") || source.startsWith("env ")
-                || source.equals("saved preference");
-    }
-
-    private static String modeLabel(ApprovalRouter approval, PermissionMode fallback) {
-        PermissionMode active = approval.permissionMode();
-        return (active == null ? fallback : active).name().toLowerCase(Locale.ROOT);
-    }
-
     private static String effortSource(Options options, Map<String, String> environment,
                                        UserPreferences preferences) {
         if (options.effort != null) return "--effort flag";
@@ -696,11 +595,6 @@ public final class Main {
 
     private static boolean notBlank(String value) {
         return value != null && !value.isBlank();
-    }
-
-    private static boolean isCommand(String line, String command) {
-        return line.equals(command) || (line.startsWith(command) && line.length() > command.length()
-                && Character.isWhitespace(line.charAt(command.length())));
     }
 
     private static SessionRules authorityRules(SubagentManager.ChildConfiguration child,

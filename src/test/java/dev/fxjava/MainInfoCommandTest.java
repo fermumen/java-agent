@@ -50,7 +50,7 @@ class MainInfoCommandTest {
     }
 
     @Test
-    void doctorExplainsWhyTheInteractiveUiWouldFallBack() throws Exception {
+    void doctorExplainsWhyRawModeIsUnavailable() throws Exception {
         JsonNode doctor = runJson(new String[]{"doctor", "--json", "--workspace", temporary.toString()},
                 Map.of("JAVA_AGENT_HOME", temporary.resolve("state").toString()));
         JsonNode terminal = null;
@@ -58,12 +58,25 @@ class MainInfoCommandTest {
         assertTrue(terminal != null, doctor.toString());
         // Tests run without a console, so the probe must decline and name the reason.
         assertEquals("warn", terminal.path("status").asText());
-        assertTrue(terminal.path("detail").asText().startsWith("plain prompt: "), terminal.toString());
+        assertTrue(terminal.path("detail").asText().startsWith("raw mode unavailable: "), terminal.toString());
         assertEquals(1, doctor.path("warn_count").asInt());
 
-        JsonNode disabled = runJson(new String[]{"doctor", "--json", "--workspace", temporary.toString()},
-                Map.of("JAVA_AGENT_HOME", temporary.resolve("state").toString(), "JAVA_AGENT_RAW_TERMINAL", "off"));
-        assertTrue(disabled.path("checks").toString().contains("disabled by JAVA_AGENT_RAW_TERMINAL"));
+
+    }
+
+    @Test
+    void interactiveStartupRejectsUnavailableRawModeInsteadOfFallingBack() throws Exception {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        ByteArrayOutputStream errors = new ByteArrayOutputStream();
+        int code = Main.run(new String[]{"--workspace", temporary.toString(), "--session-root",
+                        temporary.resolve("raw-required").toString()},
+                Map.of("OPENAI_API_KEY", "test-key", "TERM", "dumb"),
+                java.io.InputStream.nullInputStream(), new PrintStream(bytes, true, StandardCharsets.UTF_8),
+                new PrintStream(errors, true, StandardCharsets.UTF_8));
+        assertEquals(2, code);
+        assertEquals("", bytes.toString(StandardCharsets.UTF_8));
+        assertTrue(errors.toString(StandardCharsets.UTF_8).contains("a raw terminal is required"));
+        assertTrue(errors.toString(StandardCharsets.UTF_8).contains("java-agent ask <prompt>"));
     }
 
     @Test

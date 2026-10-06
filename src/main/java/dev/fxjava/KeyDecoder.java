@@ -113,7 +113,8 @@ final class KeyDecoder {
         } else if (b == 'O') {
             state = State.SS3;
         } else if (b == 0x1b) {
-            // restarted escape: remain waiting
+            state = State.GROUND;
+            events.add(KeyEvent.of(KeyEvent.Kind.DOUBLE_ESCAPE));
         } else {
             state = State.GROUND;
             if (b == 0x7f || b == 0x08) events.add(KeyEvent.altBackspace());

@@ -15,10 +15,10 @@ class SlashMenuTest {
     void syncOpensForSlashTokensAndClosesOtherwise() {
         SlashMenu menu = new SlashMenu();
         assertFalse(menu.active());
-        menu.sync(true, "/se");
+        menu.sync(true, "/re");
         assertTrue(menu.active());
-        assertEquals("/sessions", menu.selectedMatch().token);
-        menu.sync(false, "/se");
+        assertEquals("/resume", menu.selectedMatch().token);
+        menu.sync(false, "/re");
         assertFalse(menu.active());
         assertNull(menu.selectedMatch());
     }

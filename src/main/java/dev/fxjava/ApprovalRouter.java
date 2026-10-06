@@ -13,7 +13,7 @@ import java.util.function.Supplier;
  * session permission rules (denies before allows), then session "always"
  * grants, then hands the request to the raw shell's main loop through a
  * synchronous handoff so only the shell ever reads stdin while generating.
- * With no attached channel (non-TTY or legacy fallback) it delegates to the
+ * With no attached channel (one-shot or noninteractive requests) it delegates to the
  * active mode's wrapped policy. The active YOLO mode bypasses rules and grants;
  * ASK and AUTO resume their normal checks when selected again. Also routes
  * ask_user_question line input through the same channel.

@@ -6,7 +6,7 @@ import java.util.Objects;
 final class KeyEvent {
     enum Kind {
         ENTER, BACKSPACE, DELETE, UP, DOWN, LEFT, RIGHT, HOME, END,
-        PAGE_UP, PAGE_DOWN, TAB, SHIFT_TAB, ESCAPE,
+        PAGE_UP, PAGE_DOWN, TAB, SHIFT_TAB, ESCAPE, DOUBLE_ESCAPE,
         CTRL_CHAR, ALT_CHAR, TEXT, PASTE_START, PASTE_END, UNKNOWN
     }
 

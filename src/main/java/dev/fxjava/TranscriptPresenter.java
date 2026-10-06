@@ -15,13 +15,14 @@ import java.util.List;
 final class TranscriptPresenter {
     private final PrintStream out;
     private final Ansi ansi;
-    private final int columns;
+    private int columns;
     private final MarkdownConsole markdown;
     private final Spinner spinner;
     private final Object lock = new Object();
     private final StringBuilder pendingLine = new StringBuilder();
     private final List<String> blockLines = new ArrayList<>();
     private String toolPreview = "";
+    private String runningTool;
     private long toolStartedAt;
     private boolean inFence;
     private boolean separateNext;
@@ -33,6 +34,20 @@ final class TranscriptPresenter {
         this.columns = columns;
         this.spinner = spinner;
         this.markdown = new MarkdownConsole(ansi);
+    }
+
+    /** Re-fits a live tool line; future transcript blocks use the latest width. */
+    void resize(int columns) {
+        synchronized (lock) {
+            if (closed || this.columns == columns) return;
+            this.columns = columns;
+            if (runningTool != null) {
+                out.print('\r');
+                out.print(ansi.eraseLine());
+                out.print(ToolGroupLines.running(runningTool, toolPreview, columns, ansi));
+                out.flush();
+            }
+        }
     }
 
     /** Shows the idle indicator before the turn's first output. */
@@ -70,6 +85,7 @@ final class TranscriptPresenter {
         synchronized (lock) {
             if (closed) return;
             spinner.stop();
+            runningTool = name;
             toolPreview = preview == null ? "" : preview;
             toolStartedAt = spinner.now();
             out.print(ToolGroupLines.running(name, preview, columns, ansi));
@@ -81,6 +97,7 @@ final class TranscriptPresenter {
     void onToolEnd(String name, boolean error) {
         synchronized (lock) {
             if (closed) return;
+            runningTool = null;
             out.print('\r');
             out.print(ansi.eraseLine());
             String elapsed = Spinner.shortDuration(spinner.now() - toolStartedAt);

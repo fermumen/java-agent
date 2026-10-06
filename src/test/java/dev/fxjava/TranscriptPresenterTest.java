@@ -70,6 +70,23 @@ class TranscriptPresenterTest {
     }
 
     @Test
+    void resizeRefitsTheRunningToolAndSubsequentMarkdown() {
+        TranscriptPresenter presenter = newPresenter(80);
+        presenter.onToolStart("write_file", "a long preview that should be truncated in a narrow window");
+        bytes.reset();
+        presenter.resize(30);
+        assertEquals("\r\u001b[2K" + ToolGroupLines.running("write_file",
+                "a long preview that should be truncated in a narrow window", 30, Ansi.of(false)), output());
+        bytes.reset();
+        presenter.resize(30);
+        assertEquals("", output(), "unchanged width must not repaint");
+        presenter.onToolEnd("write_file", false);
+        presenter.onDelta("```java\nint x;\n```\n");
+        presenter.finish();
+        assertTrue(output().contains("─".repeat(25) + " java"), output());
+    }
+
+    @Test
     void cancelDropsPendingOutputAndIgnoresLateDeltas() {
         TranscriptPresenter presenter = newPresenter(80);
         presenter.begin();

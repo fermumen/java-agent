@@ -65,7 +65,7 @@ class McpStatusCommandTest {
 
         ByteArrayOutputStream interactiveOutput = new ByteArrayOutputStream();
         ByteArrayOutputStream errors = new ByteArrayOutputStream();
-        int code = Main.run(new String[]{"--no-save", "--workspace", temporary.toString(),
+        int code = TestRawShell.run(new String[]{"--no-save", "--workspace", temporary.toString(),
                         "--mcp-config", config.toString()}, Map.of("OPENAI_API_KEY", "test-key"),
                 new ByteArrayInputStream("/mcp list\n/exit\n".getBytes(StandardCharsets.UTF_8)),
                 new PrintStream(interactiveOutput, true, StandardCharsets.UTF_8),

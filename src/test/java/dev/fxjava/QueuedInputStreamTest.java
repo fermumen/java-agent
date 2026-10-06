@@ -35,6 +35,19 @@ class QueuedInputStreamTest {
     }
 
     @Test
+    void timedReadAllowsResizePollingWithoutClosingOrLosingKeys() {
+        QueuedInputStream queue = new QueuedInputStream();
+        byte[] bytes = new byte[16];
+        assertEquals(0, queue.read(bytes, 0, bytes.length, 1));
+        assertFalse(queue.closed());
+        queue.offer(new byte[]{42});
+        assertEquals(1, queue.read(bytes, 0, bytes.length, 1));
+        assertEquals(42, bytes[0]);
+        queue.close();
+        assertEquals(-1, queue.read(bytes, 0, bytes.length, 1));
+    }
+
+    @Test
     void closeDrainsBufferedBytesThenReturnsEof() throws Exception {
         QueuedInputStream queue = new QueuedInputStream();
         queue.offer(new byte[]{7});

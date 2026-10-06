@@ -1,6 +1,8 @@
 package dev.fxjava;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
@@ -72,6 +74,43 @@ class SpinnerTest {
         spinner.tick();
         assertTrue(output().startsWith("\r\u001b[2K\u001b[38;5;243m⠋"), output());
         assertTrue(output().endsWith(" \u001b[38;5;243m1s\u001b[0m"), output());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"Thinking…", "Compacting…"})
+    void shimmerMovesMoreSlowlyThanTheBrailleFrames(String label) {
+        Ansi ansi = Ansi.of(true);
+        Spinner spinner = new Spinner(new PrintStream(bytes, true, StandardCharsets.UTF_8),
+                ansi, now::get, 80_000_000L, label);
+        spinner.start();
+        reset();
+
+        now.set(80_000_000L);
+        spinner.tick();
+        assertEquals("\r\u001b[2K" + ansi.muted() + "⠙" + ansi.reset() + " "
+                + Spinner.shimmer(label, 0, ansi) + " " + ansi.muted() + "0s" + ansi.reset(),
+                output(), "The braille frame should advance without rushing the shimmer");
+
+        reset();
+        now.set(160_000_000L);
+        spinner.tick();
+        assertTrue(output().contains(" " + Spinner.shimmer(label, 0, ansi) + " "), output());
+
+        reset();
+        now.set(240_000_000L);
+        spinner.tick();
+        assertTrue(output().contains(" " + Spinner.shimmer(label, 1, ansi) + " "), output());
+
+        reset();
+        now.set(800_000_000L);
+        spinner.tick();
+        assertTrue(output().contains(" " + Spinner.shimmer(label, 4, ansi) + " "), output());
+
+        reset();
+        now.set(1_000_000_000L);
+        spinner.tick();
+        assertTrue(output().contains(" " + Spinner.shimmer(label, 5, ansi) + " "), output());
+        assertTrue(output().endsWith(" " + ansi.muted() + "1s" + ansi.reset()), output());
     }
 
     @Test

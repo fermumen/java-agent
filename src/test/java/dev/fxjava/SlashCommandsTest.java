@@ -14,12 +14,22 @@ class SlashCommandsTest {
     void filterRanksExactThenPrefixThenSubstring() {
         List<SlashCommands.Match> matches = SlashCommands.filter("/s");
         assertEquals("/status", matches.get(0).token, "registry order breaks rank ties");
-        assertEquals("/sessions", matches.get(1).token);
+        assertEquals("/stats", matches.get(1).token);
         assertTrue(matches.stream().anyMatch(match -> match.token.equals("/resume")),
                 "substring rank still surfaces /resume");
         int resumeIndex = matches.indexOf(matches.stream()
                 .filter(match -> match.token.equals("/resume")).findFirst().orElseThrow());
         assertTrue(resumeIndex > 1, "prefixes must precede substrings");
+    }
+
+    @Test
+    void resumeIsTheOnlyBrowseAndResumeCommand() {
+        assertEquals("/resume", SlashCommands.resolve("/resume").command);
+        assertEquals("/resume", SlashCommands.resolve("/resume saved-id").command);
+        assertEquals("/resume", SlashCommands.resolve("/resume last").command);
+        assertNull(SlashCommands.resolve("/sessions"), "the retired name must not remain an alias");
+        assertTrue(SlashCommands.filter("/sessions").isEmpty());
+        assertTrue(!SlashCommands.catalog(null, 120, Ansi.of(false)).contains("/sessions"));
     }
 
     @Test
@@ -84,16 +94,16 @@ class SlashCommandsTest {
     @Test
     void catalogAlignsUsageAndDimsDescriptions() {
         String catalog = SlashCommands.catalog("", 80, Ansi.of(true));
-        assertTrue(catalog.contains("  /resume <id|last>  "),
+        assertTrue(catalog.contains("  /resume [id|last]  "),
                 "usage column is padded: " + catalog);
-        assertTrue(catalog.contains("\u001b[2mresume a saved session\u001b[0m"));
+        assertTrue(catalog.contains("\u001b[2mpick or resume a saved session\u001b[0m"));
     }
 
     @Test
     void catalogQueryFiltersAcrossCommandAndDescription() {
         String byCommand = SlashCommands.catalog("rename", 80, Ansi.of(false));
         assertTrue(byCommand.contains("/rename"));
-        assertTrue(!byCommand.contains("/sessions"));
+        assertTrue(!byCommand.contains("/resume"));
 
         String byDescription = SlashCommands.catalog("health", 80, Ansi.of(false));
         assertTrue(byDescription.contains("/mcp"));
@@ -116,7 +126,7 @@ class SlashCommandsTest {
     @Test
     void everyWiredCommandIsPresent() {
         String catalog = SlashCommands.catalog(null, 120, Ansi.of(false));
-        for (String command : new String[]{"/help", "/clear", "/new", "/sessions", "/resume <id|last>",
+        for (String command : new String[]{"/help", "/clear", "/new", "/resume [id|last]",
                 "/recover <id>", "/rename <title>", "/mcp [list|status]", "/exit", "/model",
                 "/permissions", "/permissions remember <allow|deny> <tool-name> <arguments-json>",
                 "/permissions revoke <id>", "/status"}) {

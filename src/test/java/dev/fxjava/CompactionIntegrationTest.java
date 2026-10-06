@@ -153,16 +153,16 @@ class CompactionIntegrationTest {
     }
 
     @Test
-    void legacyShellRunsCompactEndToEndAndPrintsTokensLines() throws Exception {
+    void rawShellRunsCompactEndToEndAndPrintsUsageLines() throws Exception {
         Path workspace = workspace();
-        Path state = temporary.resolve("legacy-state");
+        Path state = temporary.resolve("raw-entrypoint-state");
         StringBuilder script = new StringBuilder();
         for (int index = 0; index < 5; index++) script.append("question ").append(index).append('\n');
         script.append("/compact\n/stats\n/exit\n");
         try (FakeApi api = new FakeApi(false)) {
             ByteArrayOutputStream bytes = new ByteArrayOutputStream();
             ByteArrayOutputStream errorBytes = new ByteArrayOutputStream();
-            int exit = Main.run(new String[]{"--base-url", api.baseUrl(),
+            int exit = TestRawShell.run(new String[]{"--base-url", api.baseUrl(),
                             "--workspace", workspace.toString(),
                             "--session-root", state.toString()},
                     Map.of("OPENAI_API_KEY", "test-key"),
@@ -173,8 +173,8 @@ class CompactionIntegrationTest {
             assertEquals(0, exit);
             String output = bytes.toString(StandardCharsets.UTF_8) + "\n[stderr] "
                     + errorBytes.toString(StandardCharsets.UTF_8);
-            assertTrue(output.contains("tokens: 50 in · 5 out · 55 total"),
-                    "legacy loop prints a plain per-turn tokens line: " + output);
+            assertTrue(output.contains("↑ 50 ↓ 5"),
+                    "raw shell prints a per-turn usage line: " + output);
             assertTrue(output.contains("Compacted: 10 → "), output);
             assertTrue(output.contains("compaction #1"), output);
             assertTrue(output.contains("session "), output);
@@ -190,7 +190,7 @@ class CompactionIntegrationTest {
         script.append("/compact\n/exit\n");
         try (FakeApi api = new FakeApi(false)) {
             ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-            int exit = Main.run(new String[]{"--no-save", "--base-url", api.baseUrl(),
+            int exit = TestRawShell.run(new String[]{"--no-save", "--base-url", api.baseUrl(),
                             "--workspace", workspace.toString(),
                             "--session-root", temporary.resolve("nosave-state").toString()},
                     Map.of("OPENAI_API_KEY", "test-key"),

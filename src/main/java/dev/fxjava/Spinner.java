@@ -15,6 +15,8 @@ final class Spinner {
 
     static final String THINKING = "Thinking…";
     private static final String FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+    /** Keep the label sweep calm independently of the faster braille frames. */
+    private static final long SHIMMER_INTERVAL_NANOS = 200_000_000L;
     /** Gray levels by distance from the shimmer head; anything farther is muted. */
     private static final int[] BAND = {23, 20, 17, 14};
     /** Idle steps between sweeps so the shimmer reads as a pulse, not a scroll. */
@@ -82,7 +84,7 @@ final class Spinner {
         out.print('\r');
         out.print(ansi.eraseLine());
         out.print(ansi.muted() + FRAMES.charAt(frame) + ansi.reset() + " "
-                + shimmer(label, step, ansi) + " "
+                + shimmer(label, elapsed / SHIMMER_INTERVAL_NANOS, ansi) + " "
                 + ansi.muted() + duration(elapsed) + ansi.reset());
         out.flush();
     }

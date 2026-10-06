@@ -11,8 +11,8 @@ renders real frames for visual checks.
 
 ## Ported contracts
 
-- Raw mode entry: `System.console()` present, `TERM` not `dumb`, and
-  `JAVA_AGENT_RAW_TERMINAL` not `0`/`false`/`off`. On Unix `stty` must save
+- Raw mode is required: `System.console()` present and `TERM` not `dumb`.
+  There is no line-mode fallback or raw-mode opt-out. On Unix `stty` must save
   the exact prior state (`stty -g`) before `raw -echo`; on Windows the console
   API saves both console modes, then clears line input, echo, and processed
   input and enables VT input and output processing. The API is bound through
@@ -22,9 +22,9 @@ renders real frames for visual checks.
   the runtime's `release` file lists it) and falls back to JNA, whose DLL
   unpacks into the temp directory and can be refused. Windows keys arrive on
   a reader thread (the JDK's console `available()` stays zero until Enter)
-  and the size comes from the console window. Any failure falls back cleanly
-  to the line-mode shell banner, which names the reason once; `java-agent
-  doctor` reports the probe and the binding that loaded.
+  and the size comes from the console window. Startup failure names the reason
+  and points to `java-agent doctor` or a one-shot `ask`; `doctor` reports the
+  probe and the binding that loaded.
 - Composer editing: printable insert, Backspace/Delete, Left/Right, Home/End,
   Ctrl+A/E/B/F/D/K/U/W word-and-line kills, Alt+B/F/D/Backspace word motion,
   multi-row visual wrapping with exact cursor placement.
@@ -37,6 +37,9 @@ renders real frames for visual checks.
 - Ctrl+C semantics: first press during a generation cancels it and prints
   `^C cancelled`; otherwise it clears the draft once, and a second press
   within 1.5 s exits the shell.
+- Esc Esc interrupts an active generation or compaction without exiting the
+  shell, including a turn waiting for approval or an answer. During generation,
+  queued text is preserved in the composer for the next message.
 - Welcome and status chrome: a bold two-line welcome (version, model,
   workspace, session id over a dim key-hint row), a rounded muted border
   around the composer (cyan `›` chevron, hanging indent on wrapped rows, a
@@ -49,8 +52,19 @@ renders real frames for visual checks.
   in place from a muted running dot to a check or cross, keeping the muted
   preview and adding the tool's duration; assistant text rendered
   block-by-block as complete lines arrive; and a compact muted usage line
-  after each turn (`↑ 1.2k ↓ 340 · 12s`). The line-mode loop keeps its plain
+  after each turn (`↑ 1.2k ↓ 340 · 12s`). One-shot `ask` keeps its plain
   `tokens:` line for scripts.
+- Windows resize: the queued-input wait wakes every 50 ms while idle and
+  probes the console size at most every 250 ms. Changed rows or columns redraw
+  the composer and popups without a keypress; unchanged sizes emit nothing.
+  Reflow/erase math counts visible cells, not ANSI styling bytes. Running tool
+  lines are re-fitted and later markdown blocks use the updated width.
+- `/resume` is the single browse-and-resume command. With no argument it opens
+  an inline picker for the 20 most recent workspace sessions. Rows show the
+  short id, active-session marker, optional title, and a safely redacted
+  first-message preview. Up/Down and Tab/Shift+Tab cycle,
+  Enter resumes, Esc dismisses, and selection scrolls within the available height.
+  `/resume <id>` and `/resume last` remain direct operations.
 - Markdown subset: bold ATX headings, fenced code between dim rules with a
   right-aligned language label, colored inline code, bold/italic spans that
   compose so emphasis nests inside list items and table cells, hanging-indent
@@ -83,13 +97,12 @@ renders real frames for visual checks.
 This phase does not claim fx's alternate-screen owners: there is no
 full-transcript screen manager, permission review screen, catalog menu,
 subagent manager, or hosted terminal takeover — everything renders inline.
-Resize handling polls `stty size` behind a throttle instead of receiving
-SIGWINCH. The composer has no image previews or paste-token spans; pastes
+The composer has no image previews or paste-token spans; pastes
 insert as plain text. The slash popup caps at eight rows with no scrolling
 window. The markdown parser is deliberately shallow (no setext headings,
 nested lists, alignment colons, or reference links), and during generation
-every decoded key except Ctrl+C and printable text is dropped rather than
-queued. Those remain parity work alongside the full-screen UI.
+every decoded key except Esc Esc, Ctrl+C, and printable text is dropped rather
+than queued. Those remain parity work alongside the full-screen UI.
 
 ## Permission rules
 
@@ -142,8 +155,7 @@ parent mode and owning session's denies, so lowering from yolo does not leave
 inherited full privilege in effect. The slash popup completes command tokens before the first space;
 `/permissions ask`, `/permissions auto`, and `/permissions yolo` are listed in
 `/help` and appear as completions. Nested remember/revoke arguments remain
-documented in `/help` and dispatch through `/permissions` in both raw and
-legacy shells. The standalone `permissions` info command has no active saved
+documented in `/help` and dispatch through `/permissions` in the raw shell. The standalone `permissions` info command has no active saved
 session and therefore reports no rule scope; it does not load global rules.
 ACP permission behavior remains controlled by its own client authorization
 boundary and is not changed by this interactive command.
@@ -162,7 +174,7 @@ The per-turn totals reach the UI through a default `TurnListener.onUsage`
 method (existing listeners are unaffected) and accumulate across tool steps
 within one turn. After each completed generation the raw shell prints one dim
 line (`tokens: 1234 in · 567 out · 1801 total`) once the spinner is fully
-erased so frames never tear; the legacy loop prints the same line plain, and
+erased so frames never tear; one-shot `ask` prints a plain usage line, and
 `ask --json` omits it to stay machine-readable. Cancelled or failed turns
 print nothing.
 
@@ -187,7 +199,7 @@ Subagent child sessions run their own model loops, and their token spend does
 not yet contribute to the parent session's totals; child usage is visible
 only to the child (and in provider-side accounting) until forwarding is wired.
 
-`/stats` (General category, raw and legacy shells) prints the active session
+`/stats` (General category, the raw shell) prints the active session
 line, an all-time line summed across saved sessions on disk — when more than
 200 sessions exist it says "most recent 200 of N" rather than implying
 completeness — and a per-session breakdown of the ten most recent saved
@@ -198,7 +210,7 @@ line.
 
 ## Conversation compaction
 
-`/compact` (Session category, raw and legacy shells) ports fx's
+`/compact` (Session category, the raw shell) ports fx's
 compacted_summary history turns: conversations below six items — or without
 more exchanges than the three kept verbatim — are refused with a friendly
 count. Otherwise exactly one extra model round-trip runs through the

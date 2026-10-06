@@ -45,6 +45,7 @@ final class InteractiveShell implements QuestionFlow {
     private final Composer composer = new Composer();
     private final KeyDecoder decoder = new KeyDecoder();
     private final SlashMenu menu = new SlashMenu();
+    private final SessionMenu sessionMenu = new SessionMenu();
     private final TypeAheadQueue typeAhead = new TypeAheadQueue(TYPE_AHEAD_CAPACITY_CHARS);
     private final RefreshGate sizeGate;
     private PromptHistory history;
@@ -61,6 +62,9 @@ final class InteractiveShell implements QuestionFlow {
     private final AtomicBoolean cancelled = new AtomicBoolean();
     private TerminalCapabilities capabilities;
     private int columns = TerminalCapabilities.Size.FALLBACK.columns;
+    private int terminalRows = TerminalCapabilities.Size.FALLBACK.rows;
+    private int renderedColumns = columns;
+    private List<Integer> renderedWidths = List.of();
 
     InteractiveShell(SessionRuntime session, AgentConfig config, String systemPrompt,
                      McpRuntime mcp, Path sessionRoot, InputStream input,
@@ -120,7 +124,14 @@ final class InteractiveShell implements QuestionFlow {
     /** Reads one chunk of terminal bytes and dispatches decoded events; false on EOF. */
     private boolean pumpInput() throws IOException, InterruptedException {
         byte[] buffer = new byte[1024];
-        int count = input.read(buffer);
+        int count;
+        do {
+            count = input instanceof QueuedInputStream
+                    ? ((QueuedInputStream) input).read(buffer, 0, buffer.length, 50)
+                    : input.read(buffer);
+            if (count == 0 && refreshColumns(false)) render();
+            if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
+        } while (count == 0);
         if (count < 0) return false;
         List<KeyEvent> events = decoder.feed(buffer, count);
         events.addAll(decoder.flushPending());
@@ -130,6 +141,31 @@ final class InteractiveShell implements QuestionFlow {
 
     /** Central key dispatch: composer edits, menus, and history actions live here. */
     private void handle(KeyEvent event) throws IOException, InterruptedException {
+        if (sessionMenu.active()) {
+            switch (event.kind()) {
+                case UP:
+                case SHIFT_TAB:
+                    sessionMenu.move(-1);
+                    return;
+                case DOWN:
+                case TAB:
+                    sessionMenu.move(1);
+                    return;
+                case ENTER:
+                    String id = sessionMenu.selected().id();
+                    eraseRendered();
+                    sessionMenu.close();
+                    dispatch("/resume " + id);
+                    return;
+                case ESCAPE:
+                case DOUBLE_ESCAPE:
+                    sessionMenu.close();
+                    return;
+                default:
+                    sessionMenu.close();
+                    break;
+            }
+        }
         switch (event.kind()) {
             case TEXT:
                 composer.insert(event.text());
@@ -184,6 +220,7 @@ final class InteractiveShell implements QuestionFlow {
             case CTRL_CHAR:
                 handleControl(event.key());
                 break;
+            case DOUBLE_ESCAPE:
             case ESCAPE:
                 if (menu.active()) {
                     menuDismissed = true;
@@ -270,17 +307,7 @@ final class InteractiveShell implements QuestionFlow {
      * A second press within the window leaves the shell.
      */
     private void handleCtrlC() throws InterruptedException {
-        if (worker != null && worker.isAlive()) {
-            cancelled.set(true);
-            TranscriptPresenter presenter = activePresenter;
-            if (presenter != null) presenter.cancel();
-            worker.interrupt();
-            out.println("^C cancelled");
-            out.flush();
-            worker.join(10_000);
-            ctrlCArmedAt = 0;
-            return;
-        }
+        if (cancelGeneration("^C cancelled")) return;
         long now = System.nanoTime();
         if (ctrlCArmedAt != 0 && now - ctrlCArmedAt <= CTRL_C_EXIT_WINDOW_NANOS) {
             running = false;
@@ -289,6 +316,21 @@ final class InteractiveShell implements QuestionFlow {
         ctrlCArmedAt = now;
         composer.clear();
         afterEdit();
+    }
+
+    /** Cancels only an active turn; unlike idle Ctrl+C, this never arms shell exit. */
+    private boolean cancelGeneration(String message) throws InterruptedException {
+        Thread active = worker;
+        if (active == null || !active.isAlive()) return false;
+        cancelled.set(true);
+        TranscriptPresenter presenter = activePresenter;
+        if (presenter != null) presenter.cancel();
+        active.interrupt();
+        out.println(message);
+        out.flush();
+        active.join(10_000);
+        ctrlCArmedAt = 0;
+        return true;
     }
 
     /** Re-evaluates the popup after any edit; programmatic dismissal clears on the next edit. */
@@ -325,7 +367,7 @@ final class InteractiveShell implements QuestionFlow {
     }
 
     void dispatch(String line) throws IOException, InterruptedException {
-        boolean persistedCommand = line.equals("/new") || line.equals("/sessions")
+        boolean persistedCommand = line.equals("/new")
                 || line.equals("/resume") || line.startsWith("/resume ")
                 || line.startsWith("/recover ") || line.startsWith("/rename ");
         if (persistedCommand && !session.persistent()) {
@@ -361,9 +403,15 @@ final class InteractiveShell implements QuestionFlow {
                 break;
             case "/resume": {
                 String id = argumentAfter(line, "/resume");
+                if (id.isEmpty()) {
+                    sessionMenu.open(session.sessions(config.workspace(), 20));
+                    menu.sync(false, "");
+                    if (!sessionMenu.active()) out.println("No saved sessions.");
+                    break;
+                }
                 String selectedModel = session.model();
                 boolean keepConfiguredModel = modelSourceWinsOverSession(modelSource);
-                session.resume(id.isEmpty() ? "last" : id, config.workspace());
+                session.resume(id, config.workspace());
                 if (keepConfiguredModel) session.setModel(selectedModel);
                 else modelSource = "saved session";
                 approvalRouter.clearSessionGrants();
@@ -380,9 +428,6 @@ final class InteractiveShell implements QuestionFlow {
                 out.println("Recovered as: " + session.id());
                 break;
             }
-            case "/sessions":
-                listSessions();
-                break;
             case "/rename":
                 session.rename(line.substring("/rename ".length()));
                 out.println("Session renamed.");
@@ -463,16 +508,6 @@ final class InteractiveShell implements QuestionFlow {
     private static String firstToken(String line) {
         int space = line.indexOf(' ');
         return space < 0 ? line : line.substring(0, space);
-    }
-
-    private void listSessions() throws IOException {
-        List<SessionStore.Snapshot> snapshots = session.sessions(config.workspace(), 20);
-        if (snapshots.isEmpty()) out.println("No saved sessions.");
-        for (SessionStore.Snapshot saved : snapshots) {
-            String current = saved.id().equals(session.id()) ? " *" : "";
-            String title = saved.title().isBlank() ? "" : "  " + saved.title();
-            out.println(saved.id() + current + title);
-        }
     }
 
     /** Runs one agent turn on a worker thread while the loop keeps watching for keys. */
@@ -619,7 +654,7 @@ final class InteractiveShell implements QuestionFlow {
     }
 
     /**
-     * Polls stdin while generation runs: Ctrl+C interrupts the worker, printable
+     * Polls stdin while generation runs: Esc Esc or Ctrl+C interrupts the worker, printable
      * text queues for replay, and pending approval or question requests are
      * served inline through the raw stream the worker itself never touches.
      */
@@ -631,6 +666,7 @@ final class InteractiveShell implements QuestionFlow {
             ApprovalRouter.Request request = approvalRouter.poll();
             if (request != null) serveRequest(request, presenter);
             if (!generator.isAlive()) break;
+            if (refreshColumns(false)) presenter.resize(columns);
             int available = input.available();
             if (available <= 0) {
                 presenter.tick();
@@ -640,7 +676,8 @@ final class InteractiveShell implements QuestionFlow {
             int read = input.read(buffer, 0, Math.min(available, buffer.length));
             if (read < 0) break;
             for (KeyEvent event : generationDecoder.feed(buffer, read)) {
-                if (event.kind() == KeyEvent.Kind.CTRL_CHAR && event.key() == 'c') handleCtrlC();
+                if (event.kind() == KeyEvent.Kind.DOUBLE_ESCAPE) cancelGeneration("Esc Esc cancelled");
+                else if (event.kind() == KeyEvent.Kind.CTRL_CHAR && event.key() == 'c') handleCtrlC();
                 else if (event.kind() == KeyEvent.Kind.TEXT) typeAhead.offer(event.text());
             }
         }
@@ -673,6 +710,10 @@ final class InteractiveShell implements QuestionFlow {
             int read = input.read(buffer);
             if (read < 0) return ApprovalPrompt.Decision.NO;
             for (KeyEvent event : decisionDecoder.feed(buffer, read)) {
+                if (event.kind() == KeyEvent.Kind.DOUBLE_ESCAPE) {
+                    cancelGeneration("Esc Esc cancelled");
+                    return ApprovalPrompt.Decision.NO;
+                }
                 if (event.kind() == KeyEvent.Kind.CTRL_CHAR && event.key() == 'c') {
                     handleCtrlC();
                     return ApprovalPrompt.Decision.NO;
@@ -735,6 +776,10 @@ final class InteractiveShell implements QuestionFlow {
                             out.print("\b \b");
                             out.flush();
                         }
+                        break;
+                    case DOUBLE_ESCAPE:
+                        cancelGeneration("Esc Esc cancelled");
+                        done = true;
                         break;
                     case ESCAPE:
                         done = true;
@@ -841,9 +886,13 @@ final class InteractiveShell implements QuestionFlow {
         VisualLayout.Position cursor = layout.cursorAt(composer.cursor());
         List<VisualLayout.Row> rows = layout.rows();
         String hint = StatusLines.hint(session.model(), modeLabel(), session.id(),
-                Math.max(1, columns - 2), ansi);
+                Math.max(1, columns - 3), ansi);
         List<String> above = composePendingRows();
-        List<String> below = new ArrayList<>(menu.active() ? composeMenuRows() : List.<String>of());
+        int popupRows = Math.max(1, Math.min(SlashCommands.MAX_MENU_ROWS,
+                terminalRows - above.size() - rows.size() - 4));
+        List<String> below = new ArrayList<>(sessionMenu.active()
+                ? sessionMenu.rows(columns, popupRows, session.id(), ansi)
+                : menu.active() ? composeMenuRows(popupRows) : List.<String>of());
         if (!hint.isEmpty()) below.add("  " + hint);
         List<String> lines = new ArrayList<>(above);
         lines.add(InputBox.top(columns, ansi));
@@ -880,6 +929,12 @@ final class InteractiveShell implements QuestionFlow {
         out.flush();
         renderedRows = totalRows;
         cursorRowFromTop = cursorRow;
+        renderedColumns = columns;
+        renderedWidths = new ArrayList<>();
+        for (String line : lines) {
+            // SGR bytes are styling, not cells that the terminal can reflow.
+            renderedWidths.add(MarkdownConsole.visibleWidth(line.replaceAll("\u001b\\[[0-9;]*m", "")));
+        }
     }
 
     /** One dim pending line per staged attachment, rendered between menu and composer. */
@@ -888,23 +943,26 @@ final class InteractiveShell implements QuestionFlow {
         if (pending.isEmpty()) return List.of();
         List<String> rows = new ArrayList<>();
         for (ImageAttachment image : pending) {
-            rows.add(ansi.dim() + ImageCommands.pendingLine(image) + ansi.reset());
+            rows.add(ansi.dim() + ToolGroupLines.truncate(ImageCommands.pendingLine(image),
+                    Math.max(1, columns - 1)) + ansi.reset());
         }
         return rows;
     }
 
     /** Two-column menu rows: padded command plus dim description, selected row bolded. */
-    private List<String> composeMenuRows() {
+    private List<String> composeMenuRows(int maxRows) {
         List<SlashCommands.Match> matches = menu.matches();
         int labelWidth = 0;
         for (SlashCommands.Match match : matches) {
             labelWidth = Math.max(labelWidth, MarkdownConsole.visibleWidth(match.token));
         }
         List<String> rows = new ArrayList<>();
-        for (int index = 0; index < matches.size(); index++) {
+        int count = Math.min(matches.size(), maxRows);
+        int start = Math.min(Math.max(0, menu.selectedIndex() - count + 1), matches.size() - count);
+        for (int index = start; index < start + count; index++) {
             SlashCommands.Match match = matches.get(index);
             String label = padTo(match.token, labelWidth);
-            int budget = columns - 2 - labelWidth - 1;
+            int budget = columns - 3 - labelWidth - 1;
             String description = ToolGroupLines.truncate(match.spec.description, Math.max(0, budget));
             String row = "  " + label;
             if (!description.isEmpty()) row += " " + description;
@@ -945,7 +1003,7 @@ final class InteractiveShell implements QuestionFlow {
         cursorRowFromTop = 0;
     }
 
-    /** Two-line styled welcome replacing the legacy banner in raw mode. */
+    /** Two-line styled welcome and keyboard hints. */
     private void printWelcome() {
         String effort = session.reasoningEffort() == null ? "provider default" : session.reasoningEffort();
         String header = ansi.bold() + "java-agent " + Main.VERSION + ansi.reset()
@@ -953,14 +1011,34 @@ final class InteractiveShell implements QuestionFlow {
         if (session.id() != null) header += " · session " + session.id();
         out.println(header);
         out.println(ansi.dim()
-                + "Ctrl+C cancel · Ctrl+C×2 exit · Ctrl+L clear · /help commands · Tab completes /"
+                + "Esc×2 / Ctrl+C cancel · Ctrl+C×2 exit · Ctrl+L clear · /help · Tab completes /"
                 + ansi.reset());
     }
 
-    private void refreshColumns(boolean force) {
-        if (!sizeGate.due(force)) return;
+    private boolean refreshColumns(boolean force) {
+        if (!sizeGate.due(force)) return false;
         TerminalCapabilities.Size current = capabilities == null
                 ? TerminalCapabilities.Size.FALLBACK : capabilities.size();
-        columns = current.known() ? current.columns : TerminalCapabilities.Size.FALLBACK.columns;
+        if (!current.known()) current = TerminalCapabilities.Size.FALLBACK;
+        boolean changed = columns != current.columns || terminalRows != current.rows;
+        columns = current.columns;
+        terminalRows = current.rows;
+        if (changed && renderedRows > 0) {
+            // The terminal reflows the old frame before we can repaint it. Its
+            // additional physical rows must be included in the erase/cursor math.
+            int reflowedRows = renderedRows;
+            if (renderedColumns != columns) {
+                reflowedRows = 0;
+                for (int width : renderedWidths) {
+                    reflowedRows += Math.max(1, (width + columns - 1) / columns);
+                }
+            }
+            cursorRowFromTop = Math.max(0, Math.min(terminalRows - 1,
+                    cursorRowFromTop + reflowedRows - renderedRows));
+            // Do not scroll the new frame out of view just to erase an old tail
+            // that the smaller viewport has already clipped.
+            renderedRows = Math.min(reflowedRows, terminalRows);
+        }
+        return changed;
     }
 }

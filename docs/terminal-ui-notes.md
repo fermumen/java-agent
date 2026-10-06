@@ -19,7 +19,8 @@ to it failed somewhere before the current chain held:
 So the chain is: `JdkConsoleApi` first, opened by the manifest and resolved by
 `launch-java-agent.ps1`, which passes `--add-modules jdk.internal.le` only when
 the runtime's `release` file lists it (naming a missing module aborts JVM
-startup); JNA second; the line-mode prompt last.
+startup); JNA second; a clear startup error if neither binds. There is no
+line-mode prompt fallback.
 
 Other constraints the backend relies on:
 
@@ -33,16 +34,16 @@ Other constraints the backend relies on:
   code page; JNA reads UTF-16 with `ReadConsoleW`. JLine's own event-record
   reader was avoided because its native code writes `int`s into `char` fields.
 
-## Diagnosing a fallback
+## Diagnosing a raw-mode startup failure
 
-- The shell prints one `interactive UI unavailable: <reason>` line before the
-  plain prompt whenever raw mode was attempted on a real console.
+- The interactive shell requires raw mode. If it cannot start, it prints the
+  reason and points to `java-agent doctor` or a one-shot `java-agent ask` request;
+  it never switches silently to a different UI.
 - `java-agent doctor` adds a `terminal` check: it enters and restores raw mode
   and names the binding (`console API: JDK jdk.internal.le` or `JNA (… skipped:
   why)`), even when no console is attached.
 - For JNA, `JAVA_TOOL_OPTIONS=-Djna.debug_load=true -Djna.debug_load.jna=true`
   logs which `jnidispatch` file was loaded.
-- `JAVA_AGENT_RAW_TERMINAL=0` forces the plain prompt.
 - Windows CI checks the shaded jar binds the JDK console API, and jlinks a
   runtime without `jdk.jshell` to check the launcher's `--add-modules` path.
   CI has no interactive console, so raw input itself is only verified by hand.
@@ -57,6 +58,15 @@ Other constraints the backend relies on:
   never enters the terminal's pending-wrap state.
 - Muted chrome uses 256-color grays (`Ansi.gray`) rather than SGR dim, which
   renders inconsistently across terminals.
+- Idle Windows reads have a timeout so a resize can trigger a frame without
+  keyboard input. Size probes remain throttled and unchanged sizes do not paint.
+  The terminal reflows the old frame before the next render; account for its
+  extra physical rows before erasing, and strip SGR before counting cell widths.
+  Counting colored bytes as cells over-erased history and misplaced the cursor.
+  Shrink/grow and session-picker frames are checked with the xterm replay harness.
+- The shimmer advances one cell per 200 ms independently of the braille
+  spinner's 80 ms frames. Sharing the faster frame step made the label sweep
+  feel rushed in Windows Terminal. Both animations use elapsed time, not ticks.
 
 ## Open work
 
